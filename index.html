@@ -1813,6 +1813,50 @@ function processOdds(oddsData){
     games.push({hEn,aEn,hA,aA,mp,bp,h2hH,h2hA,spLine,spH,spA,ouLine,ms,conf,betTeamEn,betOdds,betEV,betType,betColor,recLevel,timeStr,startTime:st,agree:Math.abs(mp-bp)<0.1,twDate:twDateStr(st),status:'pre',isFinal:false,isLive:false,statusText:'未開始',hScore:0,aScore:0,actualWinner:null,predCorrect:null,bp_market,sharpEdge,sharpBook});
   }
 
+  // ── 從 localStorage 補回今天已結束但 ESPN/Odds API 不再回傳的快照
+  // 比賽結束後 ESPN 可能幾小時後就不再回傳，但快照還在
+  try{
+    const _tStr=twDateStr(new Date());
+    Object.keys(localStorage).forEach(k=>{
+      if(!k.startsWith('mlb_snap_')) return;
+      try{
+        const obj=JSON.parse(localStorage.getItem(k));
+        if(!obj||!obj._gameStart) return;
+        const snapDate=twDateStr(new Date(obj._gameStart));
+        if(snapDate!==_tStr) return; // 只補今天的
+        // 從 key 解析隊伍 (格式: mlb_snap_HomeEn|AwayEn_YYYYMMDD)
+        const keyParts=k.replace('mlb_snap_','').split('_');
+        const matchup=keyParts.slice(0,-1).join('_').replace(/_/g,' ');
+        const [hEn,aEn]=matchup.split('|');
+        if(!hEn||!aEn) return;
+        // 如果這場比賽已在 games 裡就跳過
+        if(games.some(g=>g.hEn===hEn&&g.aEn===aEn)) return;
+        // 補入終場快照卡片
+        const hA=getAbbr(hEn),aA=getAbbr(aEn);
+        const st=new Date(obj._gameStart);
+        const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
+        games.push({
+          hEn,aEn,hA,aA,
+          mp:obj.mp,bp:obj.bp,h2hH:obj.h2hH,h2hA:obj.h2hA,
+          spLine:obj.spLine,ms:obj.ms,conf:obj.conf,
+          betTeamEn:obj.betTeamEn,betOdds:obj.betOdds,betEV:obj.betEV,
+          betType:obj.betType,betColor:obj.betColor,recLevel:obj.recLevel,agree:obj.agree,
+          snapInjH:obj.injH,snapInjA:obj.injA,
+          snapB2bH:obj.b2bH,snapB2bA:obj.b2bA,
+          snapPmInfo:obj.pmInfo,
+          snapHRecentAdj:obj.hRecentAdj,snapARecentAdj:obj.aRecentAdj,
+          snapHHomeSt:obj.hHomeSt,snapAAwaySt:obj.aAwaySt,
+          bp_market:obj.bp_market,sharpEdge:obj.sharpEdge,sharpBook:obj.sharpBook,
+          timeStr,startTime:st,twDate:_tStr,
+          // 從快照補回的比賽：標記為終場但分數未知
+          status:'post',isFinal:true,isLive:false,statusText:'終場',
+          hScore:0,aScore:0,actualWinner:null,predCorrect:null,
+          _fromSnap:true, // 標記來自快照補回
+        });
+      }catch(e){}
+    });
+  }catch(e){}
+
   games.sort((a,b)=>a.startTime-b.startTime);
   allGames=games;
   // 統計數字只算今日台灣時間的比賽
