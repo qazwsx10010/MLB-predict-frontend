@@ -1709,6 +1709,7 @@ function processOdds(oddsData){
     if(!isLive && !isFinal && minutesToStart > LOCK_MINUTES){
       const pmSnapInfo=getPMProb(hEn);
       const newSnap={
+        hEn,aEn,hA,aA,  // 隊伍資訊（補回快照用）
         mp,bp,h2hH,h2hA,spLine,ms,conf,
         betTeamEn,betOdds,betEV,betType,betColor,recLevel,
         agree:Math.abs(mp-bp)<0.1,
@@ -1733,7 +1734,7 @@ function processOdds(oddsData){
     // 1. 記憶體 frozenGameData（本次連線已鎖定）
     // 2. localStorage（上次連線留下的持久化快照）
     // 3. _fb 現場即時計算（僅在真的完全沒有快照時使用）
-    const _fb={mp,bp,h2hH,h2hA,spLine,ms,conf,
+    const _fb={hEn,aEn,hA,aA,mp,bp,h2hH,h2hA,spLine,ms,conf,
       betTeamEn,betOdds,betEV,betType,betColor,recLevel,agree:Math.abs(mp-bp)<0.1,
       injH:injDisplay(hEn),injA:injDisplay(aEn),
       b2bH:b2bStatus[hEn]||false,b2bA:b2bStatus[aEn]||false,
@@ -1822,17 +1823,15 @@ function processOdds(oddsData){
       try{
         const obj=JSON.parse(localStorage.getItem(k));
         if(!obj||!obj._gameStart) return;
+        // 直接從快照物件讀隊名（不從 key 解析，因為 key 裡的 | 和空格都被替換了）
+        const hEn=obj.hEn, aEn=obj.aEn;
+        if(!hEn||!aEn) return;
         const snapDate=twDateStr(new Date(obj._gameStart));
         if(snapDate!==_tStr) return; // 只補今天的
-        // 從 key 解析隊伍 (格式: mlb_snap_HomeEn|AwayEn_YYYYMMDD)
-        const keyParts=k.replace('mlb_snap_','').split('_');
-        const matchup=keyParts.slice(0,-1).join('_').replace(/_/g,' ');
-        const [hEn,aEn]=matchup.split('|');
-        if(!hEn||!aEn) return;
         // 如果這場比賽已在 games 裡就跳過
         if(games.some(g=>g.hEn===hEn&&g.aEn===aEn)) return;
         // 補入終場快照卡片
-        const hA=getAbbr(hEn),aA=getAbbr(aEn);
+        const hA=obj.hA||getAbbr(hEn), aA=obj.aA||getAbbr(aEn);
         const st=new Date(obj._gameStart);
         const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
         games.push({
@@ -1848,10 +1847,10 @@ function processOdds(oddsData){
           snapHHomeSt:obj.hHomeSt,snapAAwaySt:obj.aAwaySt,
           bp_market:obj.bp_market,sharpEdge:obj.sharpEdge,sharpBook:obj.sharpBook,
           timeStr,startTime:st,twDate:_tStr,
-          // 從快照補回的比賽：標記為終場但分數未知
-          status:'post',isFinal:true,isLive:false,statusText:'終場',
+          // 從快照補回的比賽：標記為終場但分數未知（ESPN 不再回傳）
+          status:'post',isFinal:true,isLive:false,statusText:'終場（快照）',
           hScore:0,aScore:0,actualWinner:null,predCorrect:null,
-          _fromSnap:true, // 標記來自快照補回
+          _fromSnap:true,
         });
       }catch(e){}
     });
