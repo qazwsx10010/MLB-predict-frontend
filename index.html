@@ -1604,6 +1604,10 @@ function parseBookmakers(bookmakers, hEn, aEn){
       if(mk.key==='h2h'){
         const ho=mk.outcomes.find(o=>normTeam(o.name)===hEn);
         const ao=mk.outcomes.find(o=>normTeam(o.name)===aEn);
+        // Debug：Betfair 比對失敗時印出實際隊名
+        if(!ho||!ao){
+          console.log(`⚠️ ${preferred} 隊名不匹配：期望 "${hEn}" "${aEn}"，實際:`, mk.outcomes.map(o=>o.name));
+        }
         if(ho&&ao){ sharpH=ho.price; sharpA=ao.price; foundH2H=true; }
       }
       if(mk.key==='spreads'){
