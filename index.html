@@ -1273,7 +1273,7 @@ function startAutoRefresh(){
   if(scoreTimer)clearInterval(scoreTimer);
   if(pmTimer)clearInterval(pmTimer);
   // 賠率每2小時
-  oddsTimer=setInterval(loadOdds,2*60*60*1000);
+  oddsTimer=setInterval(loadOdds,8*60*60*1000);
   // 比分每5分鐘
   scoreTimer=setInterval(loadScores,5*60*1000);
   // Polymarket 每30分鐘單獨更新
@@ -1545,12 +1545,20 @@ async function loadOdds(){
   try{
     // 依序載入：先抓 ESPN + 傷兵/B2B/Polymarket，再抓 Odds API
     await Promise.all([loadESPNScores(), loadRealTimeData()]);
-    const res=await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${key}&regions=us&markets=h2h,spreads&oddsFormat=decimal&dateFormat=iso`);
+    const res=await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${key}&regions=us,eu&markets=h2h,spreads&oddsFormat=decimal&dateFormat=iso`);
     if(!res.ok){const e=await res.json();throw new Error(e.message||`HTTP ${res.status}`)}
     const oddsJson=await res.json();
-    console.log(`📊 Odds API 回傳 ${oddsJson.length} 場，剩餘額度: ${res.headers.get('x-requests-remaining')}`);
+    const remaining=parseInt(res.headers.get('x-requests-remaining')||'999');
+    const used=res.headers.get('x-requests-used');
+    console.log(`📊 Odds API 回傳 ${oddsJson.length} 場，剩餘額度: ${remaining}，已用: ${used}`);
+    // 額度警告
+    if(remaining<50){
+      const warn=remaining<20?'🔴':'🟡';
+      setStatus('odds','',`已更新 ${new Date().toLocaleTimeString('zh-TW')} ${warn} 剩餘額度 ${remaining} 次`);
+    } else {
+      setStatus('odds','',`已更新 ${new Date().toLocaleTimeString('zh-TW')} · 剩餘 ${remaining} 次`);
+    }
     processOdds(oddsJson);
-    setStatus('odds','','已更新 '+new Date().toLocaleTimeString('zh-TW'));
   }catch(e){setStatus('odds','error','錯誤: '+e.message);document.getElementById('gamesContainer').innerHTML=`<div class="error-state">❌ ${e.message}</div>`}
 }
 
