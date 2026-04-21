@@ -1635,6 +1635,7 @@ function processOdds(oddsData){
   }
 
   // 從 ESPN 抓今日所有比賽（含已結束），去除重複
+  // 重複定義：同隊伍 + 同台灣日期（不同日期的同隊伍比賽要分開保留）
   const seenMatchups=new Set();
   for(const ev of espnScores){
     const comp=ev.competitions[0];
@@ -1642,8 +1643,10 @@ function processOdds(oddsData){
     const awayC=comp.competitors.find(c=>c.homeAway==='away');
     if(!homeC||!awayC) continue;
     const hEn=normTeam(homeC.team.displayName),aEn=normTeam(awayC.team.displayName);
-    // 去重複：同樣兩隊只保留第一筆（通常第一筆是最準確的）
-    const matchupKey=`${hEn}|${aEn}`;
+    const st=new Date(ev.date);
+    const twDate=twDateStr(st);
+    // 去重複：同樣兩隊 + 同一台灣日期 才算重複
+    const matchupKey=`${hEn}|${aEn}|${twDate}`;
     if(seenMatchups.has(matchupKey)) continue;
     seenMatchups.add(matchupKey);
     const hA=getAbbr(hEn),aA=getAbbr(aEn);
@@ -1651,11 +1654,7 @@ function processOdds(oddsData){
     const isFinal=status==='post',isLive=status==='in';
     const hScore=parseInt(homeC.score||0),aScore=parseInt(awayC.score||0);
     const statusText=isLive?(ev.status.type.shortDetail||`第${ev.status.period}局`):isFinal?'終場':ev.status.type.shortDetail||'未開始';
-    const st=new Date(ev.date);
-    // ev.date 是 UTC，new Date() 自動轉瀏覽器本地時間（台灣 UTC+8）
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
-
-    // 嘗試找 Odds API 對應資料
     const oddsKey=`${hEn}|${aEn}`;
     const oddGame=oddsMap[oddsKey];
     let h2hH=null,h2hA=null,spLine=null,spH=null,spA=null,ouLine=null;
@@ -1874,6 +1873,10 @@ function processOdds(oddsData){
   const todayGames=games.filter(g=>g.twDate===_todayStr);
   console.log(`📋 processOdds 完成：總共 ${games.length} 場，今日台灣時間 ${todayGames.length} 場`);
   console.log(`   今日各狀態：終場 ${todayGames.filter(g=>g.isFinal).length} 場，進行中 ${todayGames.filter(g=>g.isLive).length} 場，未開始 ${todayGames.filter(g=>!g.isFinal&&!g.isLive).length} 場`);
+  // 按日期分組統計
+  const byDate={};
+  games.forEach(g=>{const d=g.twDate||'unknown';byDate[d]=(byDate[d]||0)+1;});
+  console.log('📅 各台灣日期場次數：', JSON.stringify(byDate));
   document.getElementById('statGames').textContent=todayGames.length;
   document.getElementById('statRec').textContent=todayGames.filter(g=>g.recLevel==='rec').length;
   const maxEV=todayGames.filter(g=>!g.isFinal).length?Math.max(...todayGames.filter(g=>!g.isFinal).map(g=>g.betEV)):0;
