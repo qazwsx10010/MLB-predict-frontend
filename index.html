@@ -386,6 +386,9 @@ main{max-width:1200px;margin:0 auto;padding:1.5rem 1.5rem 4rem}
         <button class="filter-btn" onclick="setFilter('con',this)">🔶 可考慮</button>
         <button class="filter-btn" onclick="setFilter('agree',this)">✅ 來源一致</button>
       </div>
+      <div class="filter-group" id="dateFilterGroup" style="display:none">
+        <!-- 日期按鈕由 JS 動態生成 -->
+      </div>
       <select class="sort-select" onchange="setSort(this.value)">
         <option value="ev">依期望值排序</option>
         <option value="time">依時間排序</option>
@@ -752,7 +755,7 @@ function renderSpreadAnalysis(){
 
   document.getElementById('spreadAnalysisCount').textContent=`${totalAnalyzed} 場分析`;
 }
-let allGames=[],currentFilter='all',currentSort='ev';
+let allGames=[],currentFilter='all',currentSort='ev',currentDateFilter='all';
 let frozenGameData={}; // key: hEn|aEn → 開打前完整預測快照
 const LOCK_MINUTES = 5; // 開賽前幾分鐘起鎖定預測，不再更新快照
 
@@ -1141,6 +1144,33 @@ function showPage(id,btn){
   }
 }
 function setFilter(f,btn){currentFilter=f;document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGames()}
+
+function setDateFilter(d,btn){
+  currentDateFilter=d;
+  document.querySelectorAll('#dateFilterGroup .filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderGames();
+}
+
+function updateDateFilterButtons(){
+  const group=document.getElementById('dateFilterGroup');
+  if(!group) return;
+  // 收集所有有場次的日期
+  const dates=new Set(allGames.map(g=>g.twDate).filter(Boolean));
+  const sorted=[...dates].sort();
+  if(sorted.length<=1){
+    group.style.display='none'; return;
+  }
+  group.style.display='';
+  const todayStr=twDateStr(new Date());
+  group.innerHTML='<button class="filter-btn'+(currentDateFilter==='all'?' active':'')+'" onclick="setDateFilter(\'all\',this)">📅 全日期</button>'
+    +sorted.map(d=>{
+      const [,m,dd]=d.split('-');
+      const label=d===todayStr?`今天 ${parseInt(m)}/${parseInt(dd)}`:`${parseInt(m)}/${parseInt(dd)}`;
+      const active=currentDateFilter===d?' active':'';
+      return `<button class="filter-btn${active}" onclick="setDateFilter('${d}',this)">${label}</button>`;
+    }).join('');
+}
 function setSort(s){currentSort=s;renderGames()}
 function setStatus(type,state,text){
   document.getElementById(type+'StatusDot').className='sdot'+(state==='loading'?' loading':state==='error'?' error':'');
@@ -1882,7 +1912,9 @@ function processOdds(oddsData){
   const maxEV=todayGames.filter(g=>!g.isFinal).length?Math.max(...todayGames.filter(g=>!g.isFinal).map(g=>g.betEV)):0;
   document.getElementById('statMaxEV').textContent=maxEV>0?`+${maxEV.toFixed(1)}%`:'—';
   document.getElementById('statAgree').textContent=todayGames.filter(g=>g.agree).length;
-  renderAIPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));renderGames();
+  renderAIPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));
+  updateDateFilterButtons();
+  renderGames();
 }
 
 function renderAIPicks(games){
@@ -1907,6 +1939,8 @@ function renderAIPicks(games){
 
 function renderGames(){
   let games=[...allGames];
+  // 日期篩選（優先）
+  if(currentDateFilter!=='all') games=games.filter(g=>g.twDate===currentDateFilter);
   if(currentFilter==='rec')games=games.filter(g=>g.recLevel==='rec');
   else if(currentFilter==='con')games=games.filter(g=>g.recLevel==='con');
   else if(currentFilter==='agree')games=games.filter(g=>g.agree);
