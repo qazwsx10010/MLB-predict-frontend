@@ -1486,18 +1486,21 @@ function renderTWOdds(games){
 let espnScores=[];
 async function loadESPNScores(){
   try{
-    // MLB 抓今天+未來2天，確保明後天場次都能取得狀態
+    // MLB 跨時區問題：台灣早上6點開打 = 美東前一天下午6點
+    // ESPN 用美東日期，所以必須抓「昨天+今天+明天+後天」共4天
     const dates=[];
-    for(let i=0;i<3;i++){
+    for(let i=-1;i<=2;i++){
       const d=new Date(); d.setDate(d.getDate()+i);
-      // 台灣時間 → UTC日期（ESPN 用 UTC 日期）
-      const utc=new Date(d.getTime()-8*3600000);
-      dates.push(`${utc.getFullYear()}${String(utc.getMonth()+1).padStart(2,'0')}${String(utc.getDate()).padStart(2,'0')}`);
+      // 台灣時間 → 美東時間（UTC-5，夏令UTC-4）
+      // 用 UTC-5 偏移確保不遺漏
+      const est=new Date(d.getTime()-13*3600000); // 台灣UTC+8，美東UTC-5，差13小時
+      dates.push(`${est.getFullYear()}${String(est.getMonth()+1).padStart(2,'0')}${String(est.getDate()).padStart(2,'0')}`);
     }
+    // 去重複日期（時差可能導致兩個台灣日期對應同一個美東日期）
+    const uniqueDates=[...new Set(dates)];
     const results=await Promise.all(
-      dates.map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]})))
+      uniqueDates.map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]})))
     );
-    // 合併三天，去除重複 eventId
     const seen=new Set();
     espnScores=results.flatMap(data=>(data.events||[]).filter(ev=>{
       if(seen.has(ev.id)) return false;
@@ -2147,15 +2150,16 @@ function renderGames(){
 async function loadScores(){
   setStatus('score','loading','比分更新中...');
   try{
-    // 抓今天+明天的比分（MLB 跨日場次多）
+    // 跨時區：台灣早上 = 美東前一天，需抓昨天+今天+明天
     const dates=[];
-    for(let i=0;i<2;i++){
+    for(let i=-1;i<=1;i++){
       const d=new Date(); d.setDate(d.getDate()+i);
-      const utc=new Date(d.getTime()-8*3600000);
-      dates.push(`${utc.getFullYear()}${String(utc.getMonth()+1).padStart(2,'0')}${String(utc.getDate()).padStart(2,'0')}`);
+      const est=new Date(d.getTime()-13*3600000);
+      dates.push(`${est.getFullYear()}${String(est.getMonth()+1).padStart(2,'0')}${String(est.getDate()).padStart(2,'0')}`);
     }
+    const uniqueDates=[...new Set(dates)];
     const results=await Promise.all(
-      dates.map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]})))
+      uniqueDates.map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]})))
     );
     const seen=new Set();
     const allEvents=results.flatMap(data=>(data.events||[]).filter(ev=>{
