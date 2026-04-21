@@ -1517,7 +1517,9 @@ async function loadOdds(){
     await Promise.all([loadESPNScores(), loadRealTimeData()]);
     const res=await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${key}&regions=us&markets=h2h,spreads&oddsFormat=decimal&dateFormat=iso`);
     if(!res.ok){const e=await res.json();throw new Error(e.message||`HTTP ${res.status}`)}
-    processOdds(await res.json());
+    const oddsJson=await res.json();
+    console.log(`📊 Odds API 回傳 ${oddsJson.length} 場，剩餘額度: ${res.headers.get('x-requests-remaining')}`);
+    processOdds(oddsJson);
     setStatus('odds','','已更新 '+new Date().toLocaleTimeString('zh-TW'));
   }catch(e){setStatus('odds','error','錯誤: '+e.message);document.getElementById('gamesContainer').innerHTML=`<div class="error-state">❌ ${e.message}</div>`}
 }
@@ -1623,6 +1625,7 @@ function parseBookmakers(bookmakers, hEn, aEn){
 }
 
 function processOdds(oddsData){
+  console.log(`🔄 processOdds 開始，ESPN ${espnScores.length} 場，Odds API ${oddsData.length} 場`);
   const games=[];
   const oddsMap={};
   for(const game of oddsData){
@@ -1792,9 +1795,10 @@ function processOdds(oddsData){
   }
 
   // 加入 Odds API 有但 ESPN 沒有的比賽（包含明後天場次）
+  let addedFromOdds=0, skippedFromOdds=[];
   for(const game of oddsData){
     const hEn=normTeam(game.home_team),aEn=normTeam(game.away_team);
-    if(games.some(g=>g.hEn===hEn&&g.aEn===aEn)) continue;
+    if(games.some(g=>g.hEn===hEn&&g.aEn===aEn)){ skippedFromOdds.push(`${hEn}|${aEn}`); continue; }
     const hA=getAbbr(hEn),aA=getAbbr(aEn);
     const parsed2 = parseBookmakers(game.bookmakers||[], hEn, aEn);
     const {h2hH,h2hA,spLine,spH,spA,ouLine,bp_sharp,bp_market,sharpEdge,sharpBook} = parsed2;
@@ -1814,7 +1818,12 @@ function processOdds(oddsData){
     const st=new Date(game.commence_time);
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
     games.push({hEn,aEn,hA,aA,mp,bp,h2hH,h2hA,spLine,spH,spA,ouLine,ms,conf,betTeamEn,betOdds,betEV,betType,betColor,recLevel,timeStr,startTime:st,agree:Math.abs(mp-bp)<0.1,twDate:twDateStr(st),status:'pre',isFinal:false,isLive:false,statusText:'未開始',hScore:0,aScore:0,actualWinner:null,predCorrect:null,bp_market,sharpEdge,sharpBook});
+    addedFromOdds++;
   }
+  console.log(`📊 Odds API 補入 ${addedFromOdds} 場，跳過 ${skippedFromOdds.length} 場（已在 ESPN）`);
+  if(skippedFromOdds.length) console.log('跳過的場次:', skippedFromOdds);
+  const espnGames=games.filter(g=>!g._fromSnap);
+  console.log(`📺 ESPN 比賽: ${espnGames.length} 場, 總計: ${games.length} 場`);
 
   // ── 從 localStorage 補回今天已結束但 ESPN/Odds API 不再回傳的快照
   // 比賽結束後 ESPN 可能幾小時後就不再回傳，但快照還在
@@ -1863,6 +1872,8 @@ function processOdds(oddsData){
   // 統計數字只算今日台灣時間的比賽
   const _todayStr=twDateStr(new Date());
   const todayGames=games.filter(g=>g.twDate===_todayStr);
+  console.log(`📋 processOdds 完成：總共 ${games.length} 場，今日台灣時間 ${todayGames.length} 場`);
+  console.log(`   今日各狀態：終場 ${todayGames.filter(g=>g.isFinal).length} 場，進行中 ${todayGames.filter(g=>g.isLive).length} 場，未開始 ${todayGames.filter(g=>!g.isFinal&&!g.isLive).length} 場`);
   document.getElementById('statGames').textContent=todayGames.length;
   document.getElementById('statRec').textContent=todayGames.filter(g=>g.recLevel==='rec').length;
   const maxEV=todayGames.filter(g=>!g.isFinal).length?Math.max(...todayGames.filter(g=>!g.isFinal).map(g=>g.betEV)):0;
