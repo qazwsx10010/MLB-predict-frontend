@@ -1589,7 +1589,8 @@ function twDateLabel(dateStr){
 // 回傳：{ h2hH, h2hA, spLine, spH, spA, ouLine,   ← Sharp 來源（優先）
 //         bp_sharp, bp_market, sharpEdge,           ← 聰明錢訊號
 //         sharpBook }                               ← 實際用了哪個 Sharp 來源
-const SHARP_BOOKS = ['betfair_ex_eu', 'pinnacle'];
+// Sharp 優先順序：Betfair > Pinnacle > Bet365(sport888) > Unibet > Winamax
+const SHARP_BOOKS = ['betfair_ex_eu','pinnacle','sport888','unibet_fr','winamax_fr','winamax_de','onexbet','lowvig','betonlineag'];
 function parseBookmakers(bookmakers, hEn, aEn){
   let sharpH=null, sharpA=null, sharpSpLine=null, sharpSpH=null, sharpSpA=null, sharpOuLine=null, sharpBook=null;
   // 收集所有 bookmaker 的 h2h，用來算市場平均
