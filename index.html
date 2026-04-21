@@ -1515,7 +1515,7 @@ async function loadOdds(){
   try{
     // 依序載入：先抓 ESPN + 傷兵/B2B/Polymarket，再抓 Odds API
     await Promise.all([loadESPNScores(), loadRealTimeData()]);
-    const res=await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${key}&regions=us,eu&markets=h2h,spreads,totals&oddsFormat=decimal&dateFormat=iso`);
+    const res=await fetch(`https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey=${key}&regions=us&markets=h2h,spreads&oddsFormat=decimal&dateFormat=iso`);
     if(!res.ok){const e=await res.json();throw new Error(e.message||`HTTP ${res.status}`)}
     processOdds(await res.json());
     setStatus('odds','','已更新 '+new Date().toLocaleTimeString('zh-TW'));
