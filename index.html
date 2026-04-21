@@ -1695,6 +1695,12 @@ function processOdds(oddsData){
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
     const oddsKey=`${hEn}|${aEn}`;
     const oddGame=oddsMap[oddsKey];
+    // Debug：道奇那場
+    if(hEn.includes('Dodger')||aEn.includes('Dodger')){
+      console.log(`🔍 道奇 ESPN: hEn="${hEn}" aEn="${aEn}" 有Odds:${!!oddGame} twDate:${twDate}`);
+      console.log(`   oddsMap 道奇相關keys:`, Object.keys(oddsMap).filter(k=>k.includes('Dodger')));
+      if(oddGame) console.log(`   bookmakers:`, oddGame.bookmakers.map(b=>b.key));
+    }
     let h2hH=null,h2hA=null,spLine=null,spH=null,spA=null,ouLine=null;
     let bp_sharp=null, bp_market=null, sharpEdge=null, sharpBook=null;
     if(oddGame){
