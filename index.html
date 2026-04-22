@@ -2240,25 +2240,67 @@ async function loadScores(){
 function renderScores(events){
   const c=document.getElementById('scoresContainer');
   if(!events.length){c.innerHTML='<div class="loading-state" style="color:var(--text3)">今日無賽事</div>';return}
-  const grid=document.createElement('div');grid.className='scores-grid';
+
+  // 按台灣日期分組
+  const groups=new Map();
   for(const ev of events){
-    const comp=ev.competitions[0];const st=ev.status.type;
-    const isLive=st.state==='in',isFinal=st.state==='post';
-    const home=comp.competitors.find(c=>c.homeAway==='home');const away=comp.competitors.find(c=>c.homeAway==='away');
-    const homeWin=isFinal&&parseInt(home?.score||0)>parseInt(away?.score||0);
-    const awayWin=isFinal&&parseInt(away?.score||0)>parseInt(home?.score||0);
     const gameDate=new Date(ev.date);
-    // gameDate 是 UTC，new Date() 自動轉台灣時間
-    const twTimeStr=`${gameDate.getMonth()+1}/${gameDate.getDate()} ${String(gameDate.getHours()).padStart(2,'0')}:${String(gameDate.getMinutes()).padStart(2,'0')} 台灣時間`;
-    const statusText=isLive?(ev.status.type.shortDetail||`第${ev.status.period}局`):isFinal?'終場':twTimeStr;
-    const card=document.createElement('div');card.className=`score-card${isLive?' live-game':''}`;
-    card.innerHTML=`<div class="game-status ${isLive?'live':isFinal?'final':'pre'}">${statusText}</div>
-    <div class="score-divider"></div>
-    <div class="score-team-row"><span class="score-team-name ${awayWin?'winner':''}">${zh(normTeam(away?.team?.displayName||''))}</span><span class="score-pts ${awayWin?'winner':''}">${isLive||isFinal?away?.score||'0':'—'}</span></div>
-    <div class="score-team-row" style="margin-top:4px"><span class="score-team-name ${homeWin?'winner':''}">${zh(normTeam(home?.team?.displayName||''))}</span><span class="score-pts ${homeWin?'winner':''}">${isLive||isFinal?home?.score||'0':'—'}</span></div>`;
-    grid.appendChild(card);
+    const twDate=twDateStr(gameDate);
+    if(!groups.has(twDate)) groups.set(twDate,[]);
+    groups.get(twDate).push(ev);
   }
-  c.innerHTML='';c.appendChild(grid);
+
+  // 排序：今天優先，其次按日期
+  const todayStr=twDateStr(new Date());
+  const sortedDates=[...groups.keys()].sort((a,b)=>{
+    if(a===todayStr) return -1;
+    if(b===todayStr) return 1;
+    return a<b?-1:1;
+  });
+
+  // 進行中的比賽優先在今天那組最上面
+  const wrap=document.createElement('div');
+  for(const dateKey of sortedDates){
+    const evList=groups.get(dateKey);
+    // 排序：進行中 → 未開始 → 終場
+    evList.sort((a,b)=>{
+      const stateOrder={in:0,pre:1,post:2};
+      const sa=stateOrder[a.status.type.state]??3;
+      const sb=stateOrder[b.status.type.state]??3;
+      if(sa!==sb) return sa-sb;
+      return new Date(a.date)-new Date(b.date);
+    });
+
+    // 日期標題
+    const [,m,d]=dateKey.split('-');
+    const label=dateKey===todayStr?`今天 ${parseInt(m)}/${parseInt(d)}`:
+                dateKey>todayStr?`${parseInt(m)}/${parseInt(d)}`:`${parseInt(m)}/${parseInt(d)}（昨天）`;
+    const header=document.createElement('div');
+    header.style.cssText='font-size:13px;font-weight:600;color:var(--text2);margin:1rem 0 0.5rem;padding:0 0.25rem;border-left:3px solid var(--green);padding-left:8px';
+    header.textContent=label+` · ${evList.length} 場`;
+    wrap.appendChild(header);
+
+    const grid=document.createElement('div');grid.className='scores-grid';
+    for(const ev of evList){
+      const comp=ev.competitions[0];const st=ev.status.type;
+      const isLive=st.state==='in',isFinal=st.state==='post';
+      const home=comp.competitors.find(c=>c.homeAway==='home');
+      const away=comp.competitors.find(c=>c.homeAway==='away');
+      const homeWin=isFinal&&parseInt(home?.score||0)>parseInt(away?.score||0);
+      const awayWin=isFinal&&parseInt(away?.score||0)>parseInt(home?.score||0);
+      const gameDate=new Date(ev.date);
+      const twTimeStr=`${gameDate.getMonth()+1}/${gameDate.getDate()} ${String(gameDate.getHours()).padStart(2,'0')}:${String(gameDate.getMinutes()).padStart(2,'0')} 台灣時間`;
+      const statusText=isLive?(ev.status.type.shortDetail||`第${ev.status.period}局`):isFinal?'終場':twTimeStr;
+      const card=document.createElement('div');card.className=`score-card${isLive?' live-game':''}`;
+      card.innerHTML=`<div class="game-status ${isLive?'live':isFinal?'final':'pre'}">${statusText}</div>
+      <div class="score-divider"></div>
+      <div class="score-team-row"><span class="score-team-name ${awayWin?'winner':''}">${zh(normTeam(away?.team?.displayName||''))}</span><span class="score-pts ${awayWin?'winner':''}">${isLive||isFinal?away?.score||'0':'—'}</span></div>
+      <div class="score-team-row" style="margin-top:4px"><span class="score-team-name ${homeWin?'winner':''}">${zh(normTeam(home?.team?.displayName||''))}</span><span class="score-pts ${homeWin?'winner':''}">${isLive||isFinal?home?.score||'0':'—'}</span></div>`;
+      grid.appendChild(card);
+    }
+    wrap.appendChild(grid);
+  }
+  c.innerHTML='';c.appendChild(wrap);
 }
 
 async function loadBacktest(){
