@@ -511,11 +511,18 @@ async function loadOdds(){
 
 function processOdds(oddsData){
   const games=[];
-  const oddsMap={};
-  for(const game of oddsData){
+
+  // 用 commence_time 的台灣日期 + 隊伍建立精確的 oddsMap
+  // Odds API 每場比賽有獨立的 commence_time，同一組對戰不同天會是不同條目
+  const oddsList=oddsData.map(game=>{
     const hEn=normTeam(game.home_team),aEn=normTeam(game.away_team);
-    oddsMap[`${hEn}|${aEn}`]={...game,home_team:hEn,away_team:aEn};
-  }
+    const ct=new Date(game.commence_time);
+    const ctTwDate=twDateStr(ct);
+    return{...game,home_team:hEn,away_team:aEn,_twDate:ctTwDate,_ct:ct};
+  });
+
+  // 用來追蹤哪些 Odds API 條目已被 ESPN 匹配
+  const usedOddsIndices=new Set();
 
   const seenMatchups=new Set();
   for(const ev of espnScores){
@@ -534,21 +541,45 @@ function processOdds(oddsData){
     const hScore=parseInt(homeC.score||0),aScore=parseInt(awayC.score||0);
     const statusText=isLive?(ev.status.type.shortDetail||`第${ev.status.period}局`):isFinal?'終場':ev.status.type.shortDetail||'未開始';
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
-    const oddGame=oddsMap[`${hEn}|${aEn}`];
-    const parsed=oddGame?parseBookmakers(oddGame.bookmakers||[],hEn,aEn):{};
+
+    // 精確匹配：同隊伍 + 同一天（台灣時間），找最接近的 commence_time
+    let bestOddIdx=-1,bestDiff=Infinity;
+    for(let i=0;i<oddsList.length;i++){
+      if(usedOddsIndices.has(i))continue;
+      const o=oddsList[i];
+      if(o.home_team===hEn&&o.away_team===aEn){
+        // 同天匹配（台灣日期）
+        if(o._twDate===twDate){
+          const diff=Math.abs(o._ct-st);
+          if(diff<bestDiff){bestDiff=diff;bestOddIdx=i;}
+        }
+        // 允許 ±12 小時的模糊匹配（跨時區邊界情況）
+        else{
+          const diff=Math.abs(o._ct-st);
+          if(diff<12*3600000&&diff<bestDiff){bestDiff=diff;bestOddIdx=i;}
+        }
+      }
+    }
+
+    let parsed={};
+    if(bestOddIdx>=0){
+      usedOddsIndices.add(bestOddIdx);
+      parsed=parseBookmakers(oddsList[bestOddIdx].bookmakers||[],hEn,aEn);
+    }
+
     const g=buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText,hScore,aScore);
     if(g)games.push(g);
   }
 
-  // 補入 Odds API 有但 ESPN 沒有的
-  for(const game of oddsData){
-    const hEn=normTeam(game.home_team),aEn=normTeam(game.away_team);
-    if(games.some(g=>g.hEn===hEn&&g.aEn===aEn))continue;
-    const parsed=parseBookmakers(game.bookmakers||[],hEn,aEn);
+  // 補入 Odds API 有但 ESPN 沒有的（未被匹配的）
+  for(let i=0;i<oddsList.length;i++){
+    if(usedOddsIndices.has(i))continue;
+    const o=oddsList[i];
+    const parsed=parseBookmakers(o.bookmakers||[],o.home_team,o.away_team);
     if(!parsed.h2hH)continue;
-    const st=new Date(game.commence_time);
+    const st=o._ct;
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
-    const g=buildGameObj(hEn,aEn,parsed,st,timeStr,twDateStr(st),false,false,'未開始',0,0);
+    const g=buildGameObj(o.home_team,o.away_team,parsed,st,timeStr,o._twDate,false,false,'未開始',0,0);
     if(g)games.push(g);
   }
 
