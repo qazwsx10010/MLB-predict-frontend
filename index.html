@@ -239,14 +239,18 @@ main{max-width:1200px;margin:0 auto;padding:1.5rem 1.5rem 4rem}
       <div class="stat-card"><div class="stat-label">最高期望值</div><div class="stat-val" id="statMaxEV">—</div><div class="stat-sub">本日最佳</div></div>
       <div class="stat-card"><div class="stat-label">Sharp 同向</div><div class="stat-val" id="statAgree">—</div><div class="stat-sub">Pinnacle 方向一致</div></div>
     </div>
+    <div id="dateFilterBar" style="display:flex;gap:8px;margin-bottom:0.75rem;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--text2)">
+      <span style="font-size:12px;color:var(--text2);font-weight:500;display:flex;align-items:center;gap:4px">📅 全日期</span>
+      <div class="filter-group" id="dateFilterGroup"></div>
+    </div>
     <div class="filter-bar">
       <div class="filter-group">
         <button class="filter-btn active" onclick="setFilter('all',this)">全部</button>
         <button class="filter-btn" onclick="setFilter('rec',this)">⭐ 高信心</button>
         <button class="filter-btn" onclick="setFilter('con',this)">🔶 可考慮</button>
         <button class="filter-btn" onclick="setFilter('agree',this)">✅ Sharp 同向</button>
+        <button class="filter-btn" onclick="setFilter('finished',this)">📋 已結束</button>
       </div>
-      <div class="filter-group" id="dateFilterGroup" style="display:none"></div>
       <select class="sort-select" onchange="setSort(this.value)">
         <option value="ev">依期望值排序</option>
         <option value="time">依時間排序</option>
@@ -275,6 +279,10 @@ main{max-width:1200px;margin:0 auto;padding:1.5rem 1.5rem 4rem}
       <div class="live-badge">LIVE</div>
       <div class="section-title">即時比分</div>
       <span style="font-size:11px;color:var(--text3)">更新：<span id="scoreUpdated">—</span></span>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap;align-items:center">
+      <span style="font-size:12px;color:var(--text2);font-weight:500">📅 日期</span>
+      <div class="filter-group" id="scoreDateFilterGroup"></div>
     </div>
     <div id="scoresContainer"><div class="loading-state"><div class="loading-spinner"></div><div>載入中...</div></div></div>
   </div>
@@ -315,7 +323,7 @@ let realInjuries={};
 let pmOdds={};
 let pmLastUpdated=null;
 let allGames=[];
-let currentFilter='all',currentSort='ev',currentDateFilter='all';
+let currentFilter='all',currentSort='ev',currentDateFilter=null; // null = 之後初始化為今天
 let highConfWinRate=null;
 let histData=[],histFilter='all',histShowCount=20;
 let oddsTimer=null,scoreTimer=null,pmTimer=null,lockTimer=null;
@@ -545,7 +553,55 @@ function showPage(id,btn){
   if(id==='pinnacle')renderPinnacle();
 }
 function setFilter(f,btn){currentFilter=f;document.querySelectorAll('#page-predict .filter-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGames()}
-function setDateFilter(d,btn){currentDateFilter=d;document.querySelectorAll('#dateFilterGroup .filter-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGames();}
+function setDateFilter(d,btn){
+  currentDateFilter=d;
+  // 預測頁日期 tab 同步
+  document.querySelectorAll('#dateFilterGroup .filter-btn').forEach(b=>b.classList.remove('active'));
+  // 比分頁日期 tab 同步
+  document.querySelectorAll('#scoreDateFilterGroup .filter-btn').forEach(b=>b.classList.remove('active'));
+  // 兩邊同 d 的按鈕都標 active
+  document.querySelectorAll(`[data-date-filter="${d}"]`).forEach(b=>b.classList.add('active'));
+  if(btn) btn.classList.add('active');
+  renderGames();
+  // 如果在比分頁，重新渲染比分
+  const activePage=document.querySelector('.page.active');
+  if(activePage&&activePage.id==='page-scores') loadScores();
+}
+
+// 自動建立日期 tab（前 3 天 + 今天 + 後 N 天）
+function buildDateTabs(){
+  const todayStr=twDateStr(new Date());
+  // 收集所有資料中出現的日期（從預測 + 比分）
+  const allDates=new Set();
+  for(const g of allGames){if(g.twDate) allDates.add(g.twDate);}
+  for(const ev of espnScores){
+    try{const d=twDateStr(new Date(ev.date));allDates.add(d);}catch(e){}
+  }
+  // 強制加入今天（避免無資料時消失）
+  allDates.add(todayStr);
+  // 強制加入前 3 天（過去比賽）
+  for(let i=1;i<=3;i++){
+    const d=new Date();d.setDate(d.getDate()-i);
+    allDates.add(twDateStr(d));
+  }
+  // 排序
+  const sortedDates=[...allDates].sort();
+
+  const buildHTML=(targetDate)=>{
+    let html=`<button class="filter-btn ${targetDate==='all'?'active':''}" data-date-filter="all" onclick="setDateFilter('all',this)">全部</button>`;
+    for(const d of sortedDates){
+      const isToday=d===todayStr;
+      const isPast=d<todayStr;
+      const[,m,day]=d.split('-');
+      const label=isToday?`今天 ${parseInt(m)}/${parseInt(day)}`:(isPast?`📋 ${parseInt(m)}/${parseInt(day)}`:`${parseInt(m)}/${parseInt(day)}`);
+      const isActive=d===targetDate;
+      html+=`<button class="filter-btn ${isActive?'active':''}" data-date-filter="${d}" onclick="setDateFilter('${d}',this)">${label}</button>`;
+    }
+    return html;
+  };
+  document.getElementById('dateFilterGroup').innerHTML=buildHTML(currentDateFilter);
+  document.getElementById('scoreDateFilterGroup').innerHTML=buildHTML(currentDateFilter);
+}
 function setSort(s){currentSort=s;renderGames()}
 function setStatus(type,state,text){
   document.getElementById(type+'StatusDot').className='sdot'+(state==='loading'?' loading':state==='error'?' error':'');
@@ -636,7 +692,11 @@ async function loadStatsFromServer(){
 async function loadESPNScores(){
   try{
     const dates=new Set();
-    for(let i=-2;i<=2;i++){const d=new Date();d.setUTCDate(d.getUTCDate()+i);dates.add(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`);}
+    // 抓前 3 天到後 3 天，總共 7 天範圍（同時涵蓋 UTC 跨日邊界）
+    for(let i=-3;i<=3;i++){
+      const d=new Date();d.setUTCDate(d.getUTCDate()+i);
+      dates.add(`${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`);
+    }
     const results=await Promise.all([...dates].map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]}))));
     const seen=new Set();
     espnScores=results.flatMap(data=>(data.events||[]).filter(ev=>{if(seen.has(ev.id))return false;seen.add(ev.id);return true}));
@@ -677,8 +737,31 @@ function processOdds(oddsData){
   // 用來追蹤哪些 Odds API 條目已被 ESPN 匹配
   const usedOddsIndices=new Set();
 
-  const seenMatchups=new Set();
+  // 雙重賽偵測：先掃一遍找出哪些「同日同對戰」是 DH
+  // key = hEn|aEn|twDate，value = 該對戰當日的場次列表（按 commence_time 排序）
+  const dhMap = {};
+  for (const ev of espnScores) {
+    const comp = ev.competitions[0];
+    const homeC = comp.competitors.find(c => c.homeAway === 'home');
+    const awayC = comp.competitors.find(c => c.homeAway === 'away');
+    if (!homeC || !awayC) continue;
+    const hEn = normTeam(homeC.team.displayName), aEn = normTeam(awayC.team.displayName);
+    const st = new Date(ev.date);
+    const twDate = twDateStr(st);
+    const key = `${hEn}|${aEn}|${twDate}`;
+    if (!dhMap[key]) dhMap[key] = [];
+    dhMap[key].push({ evId: ev.id, time: st.getTime() });
+  }
+  // 排序每組對戰
+  for (const k in dhMap) {
+    dhMap[k].sort((a, b) => a.time - b.time);
+  }
+
+  // 用 ESPN event id 去重（同 event id 才算重複，不同 event id 視為不同場次）
+  const seenEventIds = new Set();
   for(const ev of espnScores){
+    if (seenEventIds.has(ev.id)) continue;
+    seenEventIds.add(ev.id);
     const comp=ev.competitions[0];
     const homeC=comp.competitors.find(c=>c.homeAway==='home');
     const awayC=comp.competitors.find(c=>c.homeAway==='away');
@@ -686,16 +769,19 @@ function processOdds(oddsData){
     const hEn=normTeam(homeC.team.displayName),aEn=normTeam(awayC.team.displayName);
     const st=new Date(ev.date);
     const twDate=twDateStr(st);
-    const matchupKey=`${hEn}|${aEn}|${twDate}`;
-    if(seenMatchups.has(matchupKey))continue;
-    seenMatchups.add(matchupKey);
     const status=ev.status.type.state;
     const isFinal=status==='post',isLive=status==='in';
     const hScore=parseInt(homeC.score||0),aScore=parseInt(awayC.score||0);
     const statusText=isLive?(ev.status.type.shortDetail||`第${ev.status.period}局`):isFinal?'終場':ev.status.type.shortDetail||'未開始';
     const timeStr=`${st.getMonth()+1}/${st.getDate()} ${String(st.getHours()).padStart(2,'0')}:${String(st.getMinutes()).padStart(2,'0')} 台灣時間`;
 
-    // 精確匹配：同隊伍 + 同一天（台灣時間），找最接近的 commence_time
+    // 雙重賽資訊：判斷這是 DH 第幾場
+    const dhKey = `${hEn}|${aEn}|${twDate}`;
+    const dhList = dhMap[dhKey] || [];
+    const isDoubleHeader = dhList.length >= 2;
+    const dhGameNum = isDoubleHeader ? (dhList.findIndex(x => x.evId === ev.id) + 1) : 0;
+
+    // 精確匹配：同隊伍 + 同一天 + 時間最接近（避開已配對的賠率）
     let bestOddIdx=-1,bestDiff=Infinity;
     for(let i=0;i<oddsList.length;i++){
       if(usedOddsIndices.has(i))continue;
@@ -721,7 +807,12 @@ function processOdds(oddsData){
     }
 
     const g=buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText,hScore,aScore);
-    if(g)games.push(g);
+    if(g){
+      g.eventId = ev.id;
+      g.isDoubleHeader = isDoubleHeader;
+      g.dhGameNum = dhGameNum;
+      games.push(g);
+    }
   }
 
   // 補入 Odds API 有但 ESPN 沒有的（未被匹配的）
@@ -740,6 +831,8 @@ function processOdds(oddsData){
   allGames=games;
 
   const todayStr=twDateStr(new Date());
+  // 首次載入時預設選「今天」
+  if(currentDateFilter===null) currentDateFilter=todayStr;
   const todayGames=games.filter(g=>g.twDate===todayStr);
   document.getElementById('statGames').textContent=todayGames.length;
   document.getElementById('statRec').textContent=todayGames.filter(g=>g.recLevel==='rec').length;
@@ -749,6 +842,7 @@ function processOdds(oddsData){
   document.getElementById('statMaxEV').textContent=maxEV>0?`+${maxEV.toFixed(1)}%`:'—';
   document.getElementById('statAgree').textContent=todayGames.filter(g=>g.sharpAgree).length;
   renderAIPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));
+  buildDateTabs();
   renderGames();
 }
 
@@ -950,10 +1044,11 @@ function renderAIPicks(games){
 
 function renderGames(){
   let games=[...allGames];
-  if(currentDateFilter!=='all')games=games.filter(g=>g.twDate===currentDateFilter);
+  if(currentDateFilter!=='all'&&currentDateFilter!==null) games=games.filter(g=>g.twDate===currentDateFilter);
   if(currentFilter==='rec')games=games.filter(g=>g.recLevel==='rec');
   else if(currentFilter==='con')games=games.filter(g=>g.recLevel==='con');
   else if(currentFilter==='agree')games=games.filter(g=>g.sharpAgree);
+  else if(currentFilter==='finished')games=games.filter(g=>g.isFinal);
 
   const livG=games.filter(g=>g.isLive);
   let preG=games.filter(g=>!g.isLive&&!g.isFinal);
@@ -1001,6 +1096,10 @@ function renderGames(){
       </div>`:'';
 
     const card=document.createElement('div');card.className=`game-card ${g.recLevel}`;
+    // 雙重賽徽章
+    const dhBadge = g.isDoubleHeader
+      ? `<span style="font-size:10px;background:rgba(26,111,212,0.12);color:#1a6fd4;padding:2px 8px;border-radius:10px;border:1px solid rgba(26,111,212,0.3);font-weight:700;margin-left:6px">⚾ DH 第 ${g.dhGameNum} 場</span>`
+      : '';
     // 鎖定徽章
     const lockBadge = g.isLocked
       ? `<span style="font-size:10px;background:rgba(108,63,197,0.15);color:#6c3fc5;padding:2px 8px;border-radius:10px;border:1px solid rgba(108,63,197,0.3);font-weight:700;margin-left:6px">🔒 已鎖定</span>`
@@ -1035,7 +1134,7 @@ function renderGames(){
     }
 
     card.innerHTML=`
-      <div class="card-header"><div class="card-time">${g.timeStr}${lockBadge}</div><div class="rec-badge ${g.recLevel}">${recLabel}</div></div>
+      <div class="card-header"><div class="card-time">${g.timeStr}${dhBadge}${lockBadge}</div><div class="rec-badge ${g.recLevel}">${recLabel}</div></div>
       ${resultBanner}
       <div class="matchup-prob">
         <div class="mp-team ${g.aP>g.hP?'fav':'dog'}" style="flex:${Math.max(g.aP,20)}">
@@ -1108,8 +1207,8 @@ function renderPinnacle(){
     const card=document.createElement('div');card.className=`pin-card ${hasEdge?'has-edge':'no-edge'}`;
     card.innerHTML=`
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div style="font-size:13px;font-weight:700">${aZH} @ ${hZH}</div>
-        <div style="font-size:11px;color:var(--text3)">${g.timeStr.split(' ')[0]}</div>
+        <div style="font-size:13px;font-weight:700">${aZH} @ ${hZH}${g.isDoubleHeader?`<span style="font-size:10px;background:rgba(26,111,212,0.12);color:#1a6fd4;padding:1px 6px;border-radius:8px;border:1px solid rgba(26,111,212,0.3);font-weight:700;margin-left:6px">⚾ DH ${g.dhGameNum}</span>`:''}</div>
+        <div style="font-size:11px;color:var(--text3)">${g.timeStr.split(' ').slice(0,2).join(' ')}</div>
       </div>
       <div class="matchup-prob">
         <div class="mp-team ${g.aP>g.hP?'fav':'dog'}" style="flex:${Math.max(g.aP,20)}"><div class="mp-label">客</div><div class="mp-name">${aZH.slice(-2)}</div><div class="mp-pct">${g.aP}%</div></div>
@@ -1142,12 +1241,9 @@ function renderPinnacle(){
 async function loadScores(){
   setStatus('score','loading','比分更新中...');
   try{
-    const dates=[];
-    for(let i=-1;i<=1;i++){const d=new Date();d.setDate(d.getDate()+i);const est=new Date(d.getTime()-13*3600000);dates.push(`${est.getFullYear()}${String(est.getMonth()+1).padStart(2,'0')}${String(est.getDate()).padStart(2,'0')}`);}
-    const results=await Promise.all([...new Set(dates)].map(d=>fetch(`https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard?dates=${d}`).then(r=>r.json()).catch(()=>({events:[]}))));
-    const seen=new Set();
-    const allEvents=results.flatMap(data=>(data.events||[]).filter(ev=>{if(seen.has(ev.id))return false;seen.add(ev.id);return true}));
-    renderScores(allEvents);
+    // 重用 espnScores（已抓 ±3 天）；如果還沒抓過，現抓
+    if(!espnScores.length) await loadESPNScores();
+    renderScores(espnScores);
     setStatus('score','','已更新 '+new Date().toLocaleTimeString('zh-TW'));
     document.getElementById('scoreUpdated').textContent=new Date().toLocaleTimeString('zh-TW');
   }catch(e){setStatus('score','error','比分錯誤')}
@@ -1155,12 +1251,38 @@ async function loadScores(){
 
 function renderScores(events){
   const c=document.getElementById('scoresContainer');
-  if(!events.length){c.innerHTML='<div class="loading-state">今日無賽事</div>';return}
+
+  // 日期篩選
+  let filtered = [...events];
+  if(currentDateFilter && currentDateFilter !== 'all') {
+    filtered = filtered.filter(ev => {
+      try { return twDateStr(new Date(ev.date)) === currentDateFilter; }
+      catch(e) { return false; }
+    });
+  }
+
+  if(!filtered.length){c.innerHTML='<div class="loading-state">此日期無賽事</div>';return}
+
+  // 雙重賽偵測（同日同對戰多場）
+  const dhMap = {};
+  for (const ev of filtered) {
+    const comp = ev.competitions[0];
+    const homeC = comp.competitors.find(c => c.homeAway === 'home');
+    const awayC = comp.competitors.find(c => c.homeAway === 'away');
+    if (!homeC || !awayC) continue;
+    const hEn = normTeam(homeC.team.displayName), aEn = normTeam(awayC.team.displayName);
+    const twDate = twDateStr(new Date(ev.date));
+    const key = `${hEn}|${aEn}|${twDate}`;
+    if (!dhMap[key]) dhMap[key] = [];
+    dhMap[key].push({ evId: ev.id, time: new Date(ev.date).getTime() });
+  }
+  for (const k in dhMap) dhMap[k].sort((a, b) => a.time - b.time);
+
   const todayStr=twDateStr(new Date());
   const stateOrder={in:0,pre:1,post:2};
-  events.sort((a,b)=>{const sa=stateOrder[a.status.type.state]??3;const sb=stateOrder[b.status.type.state]??3;return sa!==sb?sa-sb:new Date(a.date)-new Date(b.date)});
+  filtered.sort((a,b)=>{const sa=stateOrder[a.status.type.state]??3;const sb=stateOrder[b.status.type.state]??3;return sa!==sb?sa-sb:new Date(a.date)-new Date(b.date)});
   const grid=document.createElement('div');grid.className='scores-grid';
-  for(const ev of events){
+  for(const ev of filtered){
     const comp=ev.competitions[0];const st=ev.status.type;
     const isLive=st.state==='in',isFinal=st.state==='post';
     const home=comp.competitors.find(c=>c.homeAway==='home');
@@ -1170,11 +1292,20 @@ function renderScores(events){
     const gameDate=new Date(ev.date);
     const twTimeStr=`${gameDate.getMonth()+1}/${gameDate.getDate()} ${String(gameDate.getHours()).padStart(2,'0')}:${String(gameDate.getMinutes()).padStart(2,'0')}`;
     const statusText=isLive?(st.shortDetail||`第${ev.status.period}局`):isFinal?'終場':twTimeStr;
+
+    // DH 判斷
+    const hEn=normTeam(home?.team?.displayName||''),aEn=normTeam(away?.team?.displayName||'');
+    const twDate=twDateStr(gameDate);
+    const dhList=dhMap[`${hEn}|${aEn}|${twDate}`]||[];
+    const isDH=dhList.length>=2;
+    const dhNum=isDH?(dhList.findIndex(x=>x.evId===ev.id)+1):0;
+    const dhBadge=isDH?`<span style="font-size:9px;background:rgba(26,111,212,0.12);color:#1a6fd4;padding:1px 6px;border-radius:8px;border:1px solid rgba(26,111,212,0.3);font-weight:700;margin-left:4px">⚾ DH ${dhNum}</span>`:'';
+
     const card=document.createElement('div');card.className=`score-card${isLive?' live-game':''}`;
-    card.innerHTML=`<div class="game-status ${isLive?'live':isFinal?'final':'pre'}">${statusText}</div>
+    card.innerHTML=`<div class="game-status ${isLive?'live':isFinal?'final':'pre'}">${statusText}${dhBadge}</div>
       <div class="score-divider"></div>
-      <div class="score-team-row"><span class="score-team-name ${awayWin?'winner':''}">${zh(normTeam(away?.team?.displayName||''))}</span><span class="score-pts ${awayWin?'winner':''}">${isLive||isFinal?away?.score||'0':'—'}</span></div>
-      <div class="score-team-row" style="margin-top:4px"><span class="score-team-name ${homeWin?'winner':''}">${zh(normTeam(home?.team?.displayName||''))}</span><span class="score-pts ${homeWin?'winner':''}">${isLive||isFinal?home?.score||'0':'—'}</span></div>`;
+      <div class="score-team-row"><span class="score-team-name ${awayWin?'winner':''}">${zh(aEn)}</span><span class="score-pts ${awayWin?'winner':''}">${isLive||isFinal?away?.score||'0':'—'}</span></div>
+      <div class="score-team-row" style="margin-top:4px"><span class="score-team-name ${homeWin?'winner':''}">${zh(hEn)}</span><span class="score-pts ${homeWin?'winner':''}">${isLive||isFinal?home?.score||'0':'—'}</span></div>`;
     grid.appendChild(card);
   }
   c.innerHTML='';c.appendChild(grid);
