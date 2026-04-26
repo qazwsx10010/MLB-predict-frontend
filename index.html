@@ -318,16 +318,84 @@ let allGames=[];
 let currentFilter='all',currentSort='ev',currentDateFilter='all';
 let highConfWinRate=null;
 let histData=[],histFilter='all',histShowCount=20;
-let oddsTimer=null,scoreTimer=null,pmTimer=null;
+let oddsTimer=null,scoreTimer=null,pmTimer=null,lockTimer=null;
 let espnScores=[];
 
 function calcEV(p,o){return(p*o-1)*100}
+
+// ── 鎖定 + 快照系統
+const LOCK_MINUTES = 5;             // 開賽前 5 分鐘鎖定
+const SNAPSHOT_PREFIX = 'mlb_snap_';  // localStorage key 前綴
+const SNAPSHOT_TTL_HOURS = 48;        // 快照保留 48 小時後自動清除
+
+// 記憶體快照（同一 session 內優先使用，比 localStorage 快）
+const memSnapshots = {};
+
+function snapKey(hEn, aEn, gameTimeMs) {
+  return `${SNAPSHOT_PREFIX}${hEn}|${aEn}|${gameTimeMs}`;
+}
+
+function loadSnapshot(hEn, aEn, gameTimeMs) {
+  const key = snapKey(hEn, aEn, gameTimeMs);
+  // 先查記憶體
+  if (memSnapshots[key]) return memSnapshots[key];
+  // 再查 localStorage
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const snap = JSON.parse(raw);
+    memSnapshots[key] = snap; // cache 到記憶體
+    return snap;
+  } catch (e) { return null; }
+}
+
+function saveSnapshot(hEn, aEn, gameTimeMs, data) {
+  const key = snapKey(hEn, aEn, gameTimeMs);
+  const snap = { ...data, _savedAt: Date.now() };
+  memSnapshots[key] = snap;
+  try {
+    localStorage.setItem(key, JSON.stringify(snap));
+  } catch (e) {
+    // localStorage 滿了 → 先清過期再重試
+    cleanExpiredSnapshots();
+    try { localStorage.setItem(key, JSON.stringify(snap)); } catch (e2) {}
+  }
+}
+
+function cleanExpiredSnapshots() {
+  const now = Date.now();
+  const cutoff = SNAPSHOT_TTL_HOURS * 3600 * 1000;
+  const keysToRemove = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k || !k.startsWith(SNAPSHOT_PREFIX)) continue;
+    try {
+      const v = JSON.parse(localStorage.getItem(k) || '{}');
+      // 過期條件：保存超過 TTL，或比賽時間已過 6 小時（必定結束）
+      const parts = k.replace(SNAPSHOT_PREFIX, '').split('|');
+      const gt = parseInt(parts[2] || 0);
+      if ((v._savedAt && now - v._savedAt > cutoff) ||
+          (gt && now - gt > 6 * 3600 * 1000)) {
+        keysToRemove.push(k);
+      }
+    } catch (e) { keysToRemove.push(k); }
+  }
+  keysToRemove.forEach(k => {
+    localStorage.removeItem(k);
+    delete memSnapshots[k];
+  });
+}
+
+// 啟動時清一次
+cleanExpiredSnapshots();
 
 // ── Sharp 優先的 bookmaker 解析器
 const SHARP_BOOKS=['betfair_ex_eu','pinnacle','sport888','unibet_fr','winamax_fr','winamax_de','onexbet','lowvig','betonlineag'];
 function parseBookmakers(bookmakers,hEn,aEn){
   let sharpH=null,sharpA=null,sharpSpLine=null,sharpSpH=null,sharpSpA=null,sharpOuLine=null,sharpBook=null;
   const allH2H=[],allSpreads=[];
+
+  // 先找 Sharp 賠率（h2h + spreads + totals 都要 Sharp 的）
   for(const preferred of SHARP_BOOKS){
     const bk=bookmakers.find(b=>b.key===preferred);
     if(!bk)continue;
@@ -346,27 +414,69 @@ function parseBookmakers(bookmakers,hEn,aEn){
     }
     if(sharpH){sharpBook=preferred;break;}
   }
+
+  // 收集所有家的 h2h 與 spreads（同 line 才納入）
   for(const bk of bookmakers){
     for(const mk of(bk.markets||[])){
       if(mk.key==='h2h'){
         const ho=mk.outcomes.find(o=>normTeam(o.name)===hEn);
         const ao=mk.outcomes.find(o=>normTeam(o.name)===aEn);
-        if(ho&&ao)allH2H.push({h:ho.price,a:ao.price});
+        if(ho&&ao)allH2H.push({h:ho.price,a:ao.price,book:bk.key});
       }
       if(mk.key==='spreads'){
         const ho=mk.outcomes.find(o=>normTeam(o.name)===hEn);
         const ao=mk.outcomes.find(o=>normTeam(o.name)===aEn);
-        if(ho&&ao&&!allSpreads.length)allSpreads.push({line:ho.point,h:ho.price,a:ao.price});
+        if(ho&&ao)allSpreads.push({line:ho.point,h:ho.price,a:ao.price,book:bk.key});
       }
     }
   }
+
   if(!sharpH&&allH2H.length){sharpH=allH2H[0].h;sharpA=allH2H[0].a;sharpBook='market';}
   if(!sharpSpLine&&allSpreads.length){sharpSpLine=allSpreads[0].line;sharpSpH=allSpreads[0].h;sharpSpA=allSpreads[0].a;}
+
+  // === 不讓分（h2h）市場數據 ===
   const bp_sharp=sharpH?(1/sharpH)/((1/sharpH)+(1/sharpA)):null;
   let bp_market=null;
-  if(allH2H.length){const probs=allH2H.map(x=>(1/x.h)/((1/x.h)+(1/x.a)));bp_market=probs.reduce((s,p)=>s+p,0)/probs.length;}
+  let bestH2HOdds_home=sharpH,bestH2HOdds_away=sharpA;  // 找最好的賠率（最大值）
+  if(allH2H.length){
+    const probs=allH2H.map(x=>(1/x.h)/((1/x.h)+(1/x.a)));
+    bp_market=probs.reduce((s,p)=>s+p,0)/probs.length;
+    bestH2HOdds_home=Math.max(...allH2H.map(x=>x.h));
+    bestH2HOdds_away=Math.max(...allH2H.map(x=>x.a));
+  }
   const sharpEdge=(bp_sharp!=null&&bp_market!=null)?bp_sharp-bp_market:null;
-  return{h2hH:sharpH,h2hA:sharpA,spLine:sharpSpLine,spH:sharpSpH,spA:sharpSpA,ouLine:sharpOuLine,bp_sharp,bp_market,sharpEdge,sharpBook,bookmakerCount:allH2H.length};
+
+  // === 讓分（spreads）市場數據（必須同 line 才能合理平均）===
+  let sp_bp_sharp=null,sp_bp_market=null,sp_sharpEdge=null;
+  let bestSpOdds_home=sharpSpH,bestSpOdds_away=sharpSpA;
+  let spreadBookCount=0;
+  if(sharpSpLine!=null&&sharpSpH&&sharpSpA){
+    // Sharp 讓分的隱含勝率（去抽水後）
+    sp_bp_sharp=(1/sharpSpH)/((1/sharpSpH)+(1/sharpSpA));
+    // 同 line 的市場
+    const sameLine=allSpreads.filter(x=>x.line===sharpSpLine);
+    spreadBookCount=sameLine.length;
+    if(sameLine.length>=1){
+      const probs=sameLine.map(x=>(1/x.h)/((1/x.h)+(1/x.a)));
+      sp_bp_market=probs.reduce((s,p)=>s+p,0)/probs.length;
+      bestSpOdds_home=Math.max(...sameLine.map(x=>x.h));
+      bestSpOdds_away=Math.max(...sameLine.map(x=>x.a));
+    }
+    sp_sharpEdge=(sp_bp_sharp!=null&&sp_bp_market!=null)?sp_bp_sharp-sp_bp_market:null;
+  }
+
+  return{
+    h2hH:sharpH,h2hA:sharpA,
+    spLine:sharpSpLine,spH:sharpSpH,spA:sharpSpA,
+    ouLine:sharpOuLine,
+    bp_sharp,bp_market,sharpEdge,sharpBook,
+    bookmakerCount:allH2H.length,
+    // 讓分新增
+    sp_bp_sharp,sp_bp_market,sp_sharpEdge,spreadBookCount,
+    // 最佳賠率（市場最高）— 為了找真正的 EV
+    bestH2HOdds_home,bestH2HOdds_away,
+    bestSpOdds_home,bestSpOdds_away,
+  };
 }
 
 // ── Polymarket
@@ -449,10 +559,53 @@ function startAutoRefresh(){
   if(oddsTimer)clearInterval(oddsTimer);
   if(scoreTimer)clearInterval(scoreTimer);
   if(pmTimer)clearInterval(pmTimer);
+  if(lockTimer)clearInterval(lockTimer);
   oddsTimer=setInterval(loadOdds,8*60*60*1000);
   scoreTimer=setInterval(loadScores,5*60*1000);
   pmTimer=setInterval(()=>{fetchPolymarketViaBackend().then(()=>{if(allGames.length)renderGames()})},30*60*1000);
+  // 每 30 秒重算鎖定狀態與倒數，必要時建立快照
+  lockTimer=setInterval(()=>{
+    if(!allGames.length)return;
+    refreshLockStatus();
+  },30*1000);
   setInterval(updateAutoInfo,30*1000);
+}
+
+// 重新計算所有比賽的鎖定狀態（不重新打 API），必要時建立快照
+function refreshLockStatus(){
+  const now=Date.now();
+  let needRender=false;
+  for(const g of allGames){
+    const minsToStart=(g.startTime.getTime()-now)/60000;
+    const wasLocked=g.isLocked;
+    const newLocked=!g.isFinal&&!g.isLive&&minsToStart>0&&minsToStart<=LOCK_MINUTES;
+    g.minsToStart=minsToStart;
+    g.isLocked=newLocked;
+    // 剛進入鎖定區 → 立即建立快照
+    if(newLocked&&!wasLocked&&!g.usingSnapshot&&g.h2hH){
+      const newSnap={
+        h2hH:g.h2hH,h2hA:g.h2hA,spLine:g.spLine,spH:g.spH,spA:g.spA,
+        ouLine:g.ouLine,bp_sharp:g.sharpHomeProb,bp_market:g.marketHomeProb,
+        sharpEdge:g.sharpEdge,sharpBook:g.sharpBook,
+        sp_bp_sharp:g.sp_bp_sharp,sp_bp_market:g.sp_bp_market,
+        sp_sharpEdge:g.sp_sharpEdge,spreadBookCount:g.spreadBookCount,
+        bookmakerCount:g.bookmakerCount,
+        bestH2HOdds_home:g.bestH2HOdds_home,bestH2HOdds_away:g.bestH2HOdds_away,
+        bestSpOdds_home:g.bestSpOdds_home,bestSpOdds_away:g.bestSpOdds_away,
+        pmInfo:g.pmInfo
+      };
+      saveSnapshot(g.hEn,g.aEn,g.startTime.getTime(),newSnap);
+      g.usingSnapshot=true;
+      g.snapSource='記憶體';
+      console.log(`🔒 已鎖定快照：${g.aEn} @ ${g.hEn}`);
+    }
+    if(wasLocked!==newLocked||newLocked) needRender=true;
+  }
+  if(needRender){
+    const activePage=document.querySelector('.page.active');
+    if(activePage&&activePage.id==='page-predict') renderGames();
+    else if(activePage&&activePage.id==='page-pinnacle') renderPinnacle();
+  }
 }
 
 async function loadStatsFromServer(){
@@ -590,7 +743,9 @@ function processOdds(oddsData){
   const todayGames=games.filter(g=>g.twDate===todayStr);
   document.getElementById('statGames').textContent=todayGames.length;
   document.getElementById('statRec').textContent=todayGames.filter(g=>g.recLevel==='rec').length;
-  const maxEV=todayGames.filter(g=>!g.isFinal).length?Math.max(...todayGames.filter(g=>!g.isFinal).map(g=>g.bestEV)):0;
+  // 最高 EV 只看有 edge 的場次
+  const edgeGames=todayGames.filter(g=>!g.isFinal&&g.betReason!=='no_edge');
+  const maxEV=edgeGames.length?Math.max(...edgeGames.map(g=>g.bestEV)):0;
   document.getElementById('statMaxEV').textContent=maxEV>0?`+${maxEV.toFixed(1)}%`:'—';
   document.getElementById('statAgree').textContent=todayGames.filter(g=>g.sharpAgree).length;
   renderAIPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));
@@ -599,7 +754,35 @@ function processOdds(oddsData){
 
 // ── 純市場驅動：用 Sharp 賠率做分析，不用人為公式
 function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText,hScore,aScore){
-  const{h2hH,h2hA,spLine,spH,spA,ouLine,bp_sharp,bp_market,sharpEdge,sharpBook}=parsed;
+  const gameTimeMs = st.getTime();
+  const now = Date.now();
+  const minsToStart = (gameTimeMs - now) / 60000;
+  const isLocked = !isFinal && !isLive && minsToStart > 0 && minsToStart <= LOCK_MINUTES;
+  const isStartedOrLater = isLive || isFinal || minsToStart <= 0;
+
+  // 嘗試讀取快照
+  let snap = loadSnapshot(hEn, aEn, gameTimeMs);
+
+  let{h2hH,h2hA,spLine,spH,spA,ouLine,bp_sharp,bp_market,sharpEdge,sharpBook,
+      sp_bp_sharp,sp_bp_market,sp_sharpEdge,spreadBookCount,bookmakerCount,
+      bestH2HOdds_home,bestH2HOdds_away,bestSpOdds_home,bestSpOdds_away}=parsed;
+
+  // 鎖定期 / 比賽中 / 已結束 → 優先使用快照（如果存在）
+  let usingSnapshot = false;
+  if (snap && (isLocked || isStartedOrLater)) {
+    h2hH = snap.h2hH; h2hA = snap.h2hA;
+    spLine = snap.spLine; spH = snap.spH; spA = snap.spA;
+    ouLine = snap.ouLine; bp_sharp = snap.bp_sharp;
+    bp_market = snap.bp_market; sharpEdge = snap.sharpEdge;
+    sharpBook = snap.sharpBook;
+    sp_bp_sharp = snap.sp_bp_sharp; sp_bp_market = snap.sp_bp_market;
+    sp_sharpEdge = snap.sp_sharpEdge; spreadBookCount = snap.spreadBookCount;
+    bookmakerCount = snap.bookmakerCount;
+    bestH2HOdds_home = snap.bestH2HOdds_home; bestH2HOdds_away = snap.bestH2HOdds_away;
+    bestSpOdds_home = snap.bestSpOdds_home; bestSpOdds_away = snap.bestSpOdds_away;
+    usingSnapshot = true;
+  }
+
   if(!h2hH)return null;
 
   // Sharp 隱含勝率就是模型預測（不加人為調整）
@@ -608,39 +791,117 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
   const hP=Math.round(sharpHomeProb*100),aP=100-hP;
   const conf=Math.max(hP,aP);
 
-  // 計算不讓分 EV
+  // ============================================================
+  // 正確的 EV 計算：用 Sharp 真實勝率 vs 市場最高賠率
+  // ============================================================
+  // 不讓分 EV：Sharp 認為的真實勝率，比對全市場最佳賠率
   const mlFavHome=sharpHomeProb>=0.5;
-  const mlProb=mlFavHome?sharpHomeProb:1-sharpHomeProb;
-  const mlOdds=mlFavHome?h2hH:h2hA;
-  const mlEV=calcEV(mlProb,mlOdds);
+  const mlSharpProb=mlFavHome?sharpHomeProb:1-sharpHomeProb;
+  const mlBestOdds=mlFavHome?(bestH2HOdds_home||h2hH):(bestH2HOdds_away||h2hA);
+  // 用 Sharp 隱含勝率 × 市場最高賠率 - 1 = 真正的 EV
+  const mlEV=calcEV(mlSharpProb,mlBestOdds);
+  // 不讓分 Sharp 是否與市場有顯著背離（>= 2%）
+  const mlMarketDivergence=sharpEdge!=null?sharpEdge:0;
 
-  // 計算讓分 EV
-  let spEV=-99;
-  if(spLine!==null&&spH&&spA){
-    // 如果 Sharp 更看好主場但市場開主場讓分 → 主場讓分有價值
-    // 用 Sharp 隱含概率 vs 讓分賠率計算
-    const spFavHome=sharpHomeProb>=0.5;
-    const spOdds=spFavHome?spH:spA;
-    spEV=calcEV(spFavHome?sharpHomeProb:1-sharpHomeProb,spOdds);
+  // 讓分 EV：必須用讓分賠率自己反推勝率（不能用 H2H 勝率）
+  let spEV=null,spSharpProb=null,spBestOdds=null,spFavHome=null;
+  let spMarketDivergence=null;
+  if(spLine!=null&&spH&&spA&&sp_bp_sharp!=null){
+    // Sharp 讓分隱含勝率：哪邊讓分賠率隱含勝率較高，就是 Sharp 看好的那邊
+    spFavHome=sp_bp_sharp>=0.5;
+    spSharpProb=spFavHome?sp_bp_sharp:1-sp_bp_sharp;
+    spBestOdds=spFavHome?(bestSpOdds_home||spH):(bestSpOdds_away||spA);
+    spEV=calcEV(spSharpProb,spBestOdds);
+    spMarketDivergence=sp_sharpEdge!=null?sp_sharpEdge:0;
+  }
+
+  // ============================================================
+  // 選擇最佳下注：優先 Sharp 與市場有顯著背離（≥ 2%）的方向
+  // ============================================================
+  const ML_MIN_DIVERGENCE=0.02;  // 不讓分至少要 2% 背離
+  const SP_MIN_DIVERGENCE=0.02;  // 讓分至少要 2% 背離
+
+  // 不讓分有 edge：Sharp 看好方向 + Sharp 比市場更看好
+  // sharpEdge > 0 表示 Sharp 認為主場勝率更高 → 主場有 edge
+  // sharpEdge < 0 表示 Sharp 認為主場勝率更低（即客場有 edge）
+  let mlHasEdge=false;
+  if(bookmakerCount>=3&&Math.abs(mlMarketDivergence)>=ML_MIN_DIVERGENCE){
+    if(mlFavHome&&mlMarketDivergence>0)mlHasEdge=true;
+    if(!mlFavHome&&mlMarketDivergence<0)mlHasEdge=true;
+  }
+  let spHasEdge=false;
+  if(spreadBookCount>=2&&spMarketDivergence!=null&&Math.abs(spMarketDivergence)>=SP_MIN_DIVERGENCE){
+    if(spFavHome&&spMarketDivergence>0)spHasEdge=true;
+    if(!spFavHome&&spMarketDivergence<0)spHasEdge=true;
   }
 
   // 選擇最佳下注
-  let betTeamEn,betOdds,bestEV,betType,betColor;
-  if(mlEV>=spEV&&mlEV>0){
-    betTeamEn=mlFavHome?hEn:aEn;betOdds=mlOdds;bestEV=mlEV;betType='不讓分';betColor='blue';
-  }else if(spEV>mlEV&&spEV>0){
-    betTeamEn=sharpHomeProb>=0.5?hEn:aEn;betOdds=sharpHomeProb>=0.5?spH:spA;bestEV=spEV;
-    betType=spLine<0?`讓分 ${spLine}`:`讓分 +${spLine}`;betColor='green';
+  let betTeamEn,betOdds,bestEV,betType,betColor,betReason;
+  const mlEvNum=mlEV??-99;
+  const spEvNum=spEV??-99;
+
+  if(mlHasEdge&&spHasEdge){
+    // 兩個都有 edge → 選 EV 較高的
+    if(mlEvNum>=spEvNum){
+      betTeamEn=mlFavHome?hEn:aEn;betOdds=mlBestOdds;bestEV=mlEvNum;
+      betType='不讓分';betColor='blue';betReason='sharp_ml';
+    }else{
+      betTeamEn=spFavHome?hEn:aEn;betOdds=spBestOdds;bestEV=spEvNum;
+      betType=spLine<0?`讓分 ${spLine}`:`讓分 +${spLine}`;betColor='green';betReason='sharp_sp';
+    }
+  }else if(mlHasEdge){
+    betTeamEn=mlFavHome?hEn:aEn;betOdds=mlBestOdds;bestEV=mlEvNum;
+    betType='不讓分';betColor='blue';betReason='sharp_ml';
+  }else if(spHasEdge){
+    betTeamEn=spFavHome?hEn:aEn;betOdds=spBestOdds;bestEV=spEvNum;
+    betType=spLine<0?`讓分 ${spLine}`:`讓分 +${spLine}`;betColor='green';betReason='sharp_sp';
   }else{
-    betTeamEn=mlFavHome?hEn:aEn;betOdds=mlOdds;bestEV=Math.max(mlEV,spEV);betType='不讓分';betColor='blue';
+    // 沒有 edge → 觀望（顯示信心方但不推薦）
+    betTeamEn=mlFavHome?hEn:aEn;betOdds=mlBestOdds;
+    bestEV=Math.max(mlEvNum,spEvNum);
+    betType='不讓分';betColor='blue';betReason='no_edge';
   }
 
-  const recLevel=conf>=65&&bestEV>=3?'rec':bestEV>=0?'con':'obs';
-  const sharpAgree=sharpEdge!=null&&Math.abs(sharpEdge)<0.04;
-  const pmInfo=getPMProb(hEn);
+  // 推薦等級：必須有 edge + 信心 >= 60% + EV > 0
+  const recLevel=(betReason!=='no_edge'&&conf>=60&&bestEV>0)?'rec'
+    :(bestEV>=0?'con':'obs');
+
+  const sharpAgree=sharpEdge!=null&&Math.abs(sharpEdge)<0.02;
+
+  // Polymarket：鎖定後也要凍結
+  let pmInfo;
+  if (usingSnapshot && snap.pmInfo !== undefined) {
+    pmInfo = snap.pmInfo;
+  } else {
+    pmInfo = getPMProb(hEn);
+  }
+
+  // 鎖定觸發點：剛進入 5 分鐘內 + 還沒快照 → 立即建立
+  if (isLocked && !snap && h2hH) {
+    const newSnap = {
+      h2hH, h2hA, spLine, spH, spA, ouLine,
+      bp_sharp, bp_market, sharpEdge, sharpBook,
+      sp_bp_sharp, sp_bp_market, sp_sharpEdge, spreadBookCount, bookmakerCount,
+      bestH2HOdds_home, bestH2HOdds_away, bestSpOdds_home, bestSpOdds_away,
+      pmInfo
+    };
+    saveSnapshot(hEn, aEn, gameTimeMs, newSnap);
+    snap = newSnap;
+    usingSnapshot = true;
+  }
+
+  // 快照來源標記
+  let snapSource = null;
+  if (usingSnapshot) {
+    const key = snapKey(hEn, aEn, gameTimeMs);
+    if (memSnapshots[key] && !localStorage.getItem(key)) snapSource = '記憶體';
+    else if (localStorage.getItem(key)) snapSource = '硬碟';
+    else snapSource = '快照';
+  }
+
   const actualWinner=isFinal?(hScore>aScore?hEn:aEn):null;
   let predCorrect=null;
-  if(isFinal&&betTeamEn&&actualWinner){
+  if(isFinal&&betTeamEn&&actualWinner&&betReason!=='no_edge'){
     if(betType.includes('讓分')&&spLine!=null){
       const isHome=betTeamEn===hEn;
       const diff=isHome?(hScore-aScore):(aScore-hScore);
@@ -654,15 +915,22 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
   return{hEn,aEn,hA:getAbbr(hEn),aA:getAbbr(aEn),hP,aP,conf,
     h2hH,h2hA,spLine,spH,spA,ouLine,
     sharpHomeProb,marketHomeProb,sharpEdge,sharpBook,sharpAgree,
+    sp_bp_sharp,sp_bp_market,sp_sharpEdge,spreadBookCount,bookmakerCount,
+    bestH2HOdds_home,bestH2HOdds_away,bestSpOdds_home,bestSpOdds_away,
     mlEV,spEV,bestEV,
-    betTeamEn,betOdds,betType,betColor,recLevel,
+    mlMarketDivergence,spMarketDivergence,mlHasEdge,spHasEdge,
+    spSharpProb,
+    betTeamEn,betOdds,betType,betColor,recLevel,betReason,
     pmInfo,
     timeStr,startTime:st,twDate,
-    isFinal,isLive,statusText,hScore,aScore,actualWinner,predCorrect};
+    isFinal,isLive,statusText,hScore,aScore,actualWinner,predCorrect,
+    isLocked,minsToStart,usingSnapshot,snapSource};
 }
 
 function renderAIPicks(games){
-  const picks=games.filter(g=>g.conf>=65&&g.bestEV>=3).sort((a,b)=>b.bestEV-a.bestEV);
+  // 收緊條件：必須有 Sharp 與市場的顯著背離（edge）+ EV > 2%
+  const picks=games.filter(g=>g.recLevel==='rec'&&g.bestEV>2&&g.betReason!=='no_edge')
+    .sort((a,b)=>b.bestEV-a.bestEV);
   const section=document.getElementById('aiSection'),container=document.getElementById('aiPicks');
   if(!picks.length){section.style.display='none';return}
   section.style.display='block';container.innerHTML='';
@@ -733,8 +1001,41 @@ function renderGames(){
       </div>`:'';
 
     const card=document.createElement('div');card.className=`game-card ${g.recLevel}`;
+    // 鎖定徽章
+    const lockBadge = g.isLocked
+      ? `<span style="font-size:10px;background:rgba(108,63,197,0.15);color:#6c3fc5;padding:2px 8px;border-radius:10px;border:1px solid rgba(108,63,197,0.3);font-weight:700;margin-left:6px">🔒 已鎖定</span>`
+      : (g.usingSnapshot && (g.isLive || g.isFinal))
+        ? `<span style="font-size:10px;background:var(--bg3);color:var(--text3);padding:2px 8px;border-radius:10px;border:1px solid var(--border);font-weight:600;margin-left:6px">📸 ${g.snapSource||'快照'}</span>`
+        : '';
+    // 倒數計時提示（僅未開賽未鎖定時顯示）
+    let countdownTip = '';
+    if (!g.isFinal && !g.isLive) {
+      const mins = g.minsToStart;
+      let tipBg, tipColor, tipIcon, tipText, countdownStr;
+      if (g.isLocked) {
+        tipBg = 'rgba(108,63,197,0.10)'; tipColor = '#6c3fc5'; tipIcon = '🔒';
+        tipText = `預測已鎖定（開賽前 ${LOCK_MINUTES} 分鐘）${g.snapSource ? '・快照來源：' + g.snapSource : ''}，後續賠率變動不影響此預測`;
+        countdownStr = mins > 0 ? `${Math.ceil(mins)} 分後開賽` : '即將開賽';
+      } else if (mins > 240) {
+        tipBg = 'rgba(139,144,168,0.08)'; tipColor = 'var(--text3)'; tipIcon = '⏰';
+        tipText = '賠率尚未穩定，建議開賽前 1~2 小時再確認';
+        countdownStr = `${Math.floor(mins/60)} 小時 ${Math.floor(mins%60)} 分後`;
+      } else if (mins > 60) {
+        tipBg = 'rgba(10,158,110,0.08)'; tipColor = 'var(--green)'; tipIcon = '✅';
+        tipText = '最佳下注時機！賠率穩定';
+        countdownStr = `${Math.floor(mins/60)} 小時 ${Math.floor(mins%60)} 分後`;
+      } else if (mins > LOCK_MINUTES) {
+        tipBg = 'rgba(184,120,0,0.08)'; tipColor = 'var(--amber)'; tipIcon = '⚠️';
+        tipText = `開賽前 ${LOCK_MINUTES} 分鐘將自動鎖定快照`;
+        countdownStr = `${Math.ceil(mins)} 分後`;
+      }
+      if (tipText) {
+        countdownTip = `<div style="background:${tipBg};border-radius:6px;padding:7px 10px;margin-top:8px;font-size:11px;color:${tipColor};display:flex;align-items:center;gap:6px"><span>${tipIcon}</span><span>${tipText}</span><span style="margin-left:auto;font-family:'JetBrains Mono',monospace;color:${tipColor};font-weight:600">${countdownStr}</span></div>`;
+      }
+    }
+
     card.innerHTML=`
-      <div class="card-header"><div class="card-time">${g.timeStr}</div><div class="rec-badge ${g.recLevel}">${recLabel}</div></div>
+      <div class="card-header"><div class="card-time">${g.timeStr}${lockBadge}</div><div class="rec-badge ${g.recLevel}">${recLabel}</div></div>
       ${resultBanner}
       <div class="matchup-prob">
         <div class="mp-team ${g.aP>g.hP?'fav':'dog'}" style="flex:${Math.max(g.aP,20)}">
@@ -748,23 +1049,39 @@ function renderGames(){
         </div>
       </div>
       <div class="data-rows">
-        <div class="data-row"><span class="dr-label">Sharp 來源</span><span class="dr-val b">${g.sharpBook&&g.sharpBook!=='market'?`⚡ ${g.sharpBook.includes('betfair')?'Betfair':g.sharpBook.includes('pinnacle')?'Pinnacle':g.sharpBook}`:'市場平均'}</span></div>
+        <div class="data-row"><span class="dr-label">Sharp 來源</span><span class="dr-val b">${g.sharpBook&&g.sharpBook!=='market'?`⚡ ${g.sharpBook.includes('betfair')?'Betfair':g.sharpBook.includes('pinnacle')?'Pinnacle':g.sharpBook}`:'市場平均'} · ${g.bookmakerCount||1} 家</span></div>
         <div class="data-row"><span class="dr-label">Sharp 隱含勝率</span><span class="dr-val">${hZH.slice(-2)} ${bkH}% / ${aZH.slice(-2)} ${100-bkH}%</span></div>
-        ${g.sharpEdge!=null&&Math.abs(g.sharpEdge)>=0.02?`<div class="data-row"><span class="dr-label">Sharp vs 市場</span><span class="dr-val ${Math.abs(g.sharpEdge)>=0.04?'a':''}">${g.sharpEdge>0?`Sharp 更看好${hZH.slice(-2)}`:`Sharp 更看好${aZH.slice(-2)}`} ${(Math.abs(g.sharpEdge)*100).toFixed(1)}%</span></div>`:''}
+        ${g.sharpEdge!=null&&Math.abs(g.sharpEdge)>=0.02?`<div class="data-row"><span class="dr-label">Sharp vs 市場</span><span class="dr-val ${Math.abs(g.sharpEdge)>=0.03?'a':''}">${g.sharpEdge>0?`Sharp 更看好${hZH.slice(-2)}`:`Sharp 更看好${aZH.slice(-2)}`} ${(Math.abs(g.sharpEdge)*100).toFixed(1)}%</span></div>`:''}
         ${pmHPct!=null?`<div class="data-row"><span class="dr-label">🟣 Polymarket</span><span class="dr-val" style="color:${pmReliable?'#6c3fc5':'var(--amber)'}">${hZH.slice(-2)} ${pmHPct}% / ${aZH.slice(-2)} ${(100-pmHPct).toFixed(1)}%${pmH.volume>0?' · $'+pmH.volume.toLocaleString():''}</span></div>`:''}
-        ${g.spLine!=null?`<div class="data-row"><span class="dr-label">讓分盤口</span><span class="dr-val">${g.spLine<0?hZH.slice(-2)+' '+g.spLine:aZH.slice(-2)+' +'+Math.abs(g.spLine)} 分</span></div>`:''}
+        ${g.spLine!=null?`<div class="data-row"><span class="dr-label">讓分盤口</span><span class="dr-val">${g.spLine<0?hZH.slice(-2)+' '+g.spLine:aZH.slice(-2)+' +'+Math.abs(g.spLine)} 分（${g.spreadBookCount||1} 家同 line）</span></div>`:''}
+        ${g.sp_sharpEdge!=null&&Math.abs(g.sp_sharpEdge)>=0.02?`<div class="data-row"><span class="dr-label">讓分 Sharp vs 市場</span><span class="dr-val ${Math.abs(g.sp_sharpEdge)>=0.03?'a':''}">${g.sp_sharpEdge>0?'Sharp 更看好主場讓分':'Sharp 更看好客場讓分'} ${(Math.abs(g.sp_sharpEdge)*100).toFixed(1)}%</span></div>`:''}
       </div>
       <div class="ev-section">
-        <div class="ev-title">📊 期望值比較（每 100 元）</div>
+        <div class="ev-title">📊 期望值（Sharp 隱含勝率 × 市場最佳賠率）</div>
         <div class="ev-options">
-          <div class="ev-opt ${g.mlEV>=0?'pos':'neg'}"><div class="ev-type">不讓分</div><div class="ev-num ${g.mlEV>=0?'pos':'neg'}">${g.mlEV>=0?'+':''}${g.mlEV.toFixed(1)}%</div><div class="ev-detail">${g.hP>=50?hZH.slice(-2):aZH.slice(-2)} @ ${(g.hP>=50?g.h2hH:g.h2hA)?.toFixed(2)||'—'}</div></div>
-          <div class="ev-opt ${g.spEV>-90?g.spEV>=0?'pos':'neg':'neu'}"><div class="ev-type">讓分</div><div class="ev-num ${g.spEV>-90?g.spEV>=0?'pos':'neg':''}">${g.spEV>-90?(g.spEV>=0?'+':'')+g.spEV.toFixed(1)+'%':'N/A'}</div><div class="ev-detail">${g.spLine!=null?`${g.spLine} 分`:'無讓分盤'}</div></div>
+          <div class="ev-opt ${g.mlHasEdge?'pos':g.mlEV>=0?'neu':'neg'}">
+            <div class="ev-type">不讓分${g.mlHasEdge?' ⚡':''}</div>
+            <div class="ev-num ${g.mlHasEdge?'pos':g.mlEV>=0?'':'neg'}">${g.mlEV>=0?'+':''}${g.mlEV.toFixed(1)}%</div>
+            <div class="ev-detail">${g.hP>=50?hZH.slice(-2):aZH.slice(-2)} @ ${(g.hP>=50?(g.bestH2HOdds_home||g.h2hH):(g.bestH2HOdds_away||g.h2hA))?.toFixed(2)||'—'}${g.mlHasEdge?'<br>有 edge':g.bookmakerCount<3?'<br>單一來源':''}</div>
+          </div>
+          <div class="ev-opt ${g.spHasEdge?'pos':g.spEV==null?'neu':g.spEV>=0?'neu':'neg'}">
+            <div class="ev-type">讓分${g.spHasEdge?' ⚡':''}</div>
+            <div class="ev-num ${g.spHasEdge?'pos':g.spEV==null?'':g.spEV>=0?'':'neg'}">${g.spEV==null?'N/A':(g.spEV>=0?'+':'')+g.spEV.toFixed(1)+'%'}</div>
+            <div class="ev-detail">${g.spLine!=null?`${g.spLine} 分${g.spHasEdge?'<br>有 edge':g.spreadBookCount<2?'<br>單一來源':''}`:'無讓分盤'}</div>
+          </div>
         </div>
       </div>
-      <div class="bet-box ${g.bestEV>0?g.betColor:'skip'}">
-        <div><div class="bet-label" style="color:${g.bestEV>0?'rgba(255,255,255,0.75)':'var(--text3)'}">最佳下注建議</div><div class="bet-val" style="color:${g.bestEV>0?'#fff':'var(--text2)'}">${g.bestEV>0?betZH+' '+g.betType:'觀望'}</div></div>
-        <div class="bet-right"><div class="bet-odds" style="color:${g.bestEV>0?'#fff':'var(--text2)'}">賠率 ${g.betOdds?.toFixed(2)||'—'}</div><div class="bet-ev" style="color:${g.bestEV>0?'rgba(255,255,255,0.85)':'var(--text3)'}">EV ${g.bestEV>=0?'+':''}${g.bestEV.toFixed(1)}%</div></div>
-      </div>`;
+      <div class="bet-box ${g.betReason!=='no_edge'?g.betColor:'skip'}">
+        <div>
+          <div class="bet-label" style="color:${g.betReason!=='no_edge'?'rgba(255,255,255,0.75)':'var(--text3)'}">${g.betReason!=='no_edge'?'⚡ 最佳下注（有 edge）':'觀望（Sharp 與市場一致）'}</div>
+          <div class="bet-val" style="color:${g.betReason!=='no_edge'?'#fff':'var(--text2)'}">${g.betReason!=='no_edge'?betZH+' '+g.betType:'—'}</div>
+        </div>
+        <div class="bet-right">
+          <div class="bet-odds" style="color:${g.betReason!=='no_edge'?'#fff':'var(--text2)'}">賠率 ${g.betOdds?.toFixed(2)||'—'}</div>
+          <div class="bet-ev" style="color:${g.betReason!=='no_edge'?'rgba(255,255,255,0.85)':'var(--text3)'}">EV ${g.bestEV>=0?'+':''}${g.bestEV.toFixed(1)}%</div>
+        </div>
+      </div>
+      ${countdownTip}`;
     grid.appendChild(card);
   }
   container.appendChild(grid);
@@ -786,7 +1103,7 @@ function renderPinnacle(){
   sharpGames.forEach(g=>{
     const hZH=zh(g.hEn),aZH=zh(g.aEn);
     const edge=g.sharpEdge||0;
-    const hasEdge=Math.abs(edge)>=0.04;
+    const hasEdge=g.mlHasEdge||g.spHasEdge;
     const edgeTeam=edge>0?hZH.slice(-2):aZH.slice(-2);
     const card=document.createElement('div');card.className=`pin-card ${hasEdge?'has-edge':'no-edge'}`;
     card.innerHTML=`
@@ -800,19 +1117,20 @@ function renderPinnacle(){
         <div class="mp-team ${g.hP>=g.aP?'fav':'dog'}" style="flex:${Math.max(g.hP,20)}"><div class="mp-label">主</div><div class="mp-name">${hZH.slice(-2)}</div><div class="mp-pct">${g.hP}%</div></div>
       </div>
       <div style="margin-bottom:10px">
-        <div class="pin-row"><span class="pin-rl">⚡ Sharp 來源</span><span class="pin-rv b">${g.sharpBook.includes('betfair')?'Betfair Exchange':g.sharpBook.includes('pinnacle')?'Pinnacle':g.sharpBook}</span></div>
+        <div class="pin-row"><span class="pin-rl">⚡ Sharp 來源</span><span class="pin-rv b">${g.sharpBook.includes('betfair')?'Betfair Exchange':g.sharpBook.includes('pinnacle')?'Pinnacle':g.sharpBook} · ${g.bookmakerCount||1} 家</span></div>
         <div class="pin-row"><span class="pin-rl">Sharp 不讓分</span><span class="pin-rv">主 ${g.h2hH?.toFixed(2)} / 客 ${g.h2hA?.toFixed(2)}</span></div>
         <div class="pin-row"><span class="pin-rl">Sharp 隱含勝率</span><span class="pin-rv g">主 ${g.hP}% / 客 ${g.aP}%</span></div>
         <div class="pin-row"><span class="pin-rl">市場平均勝率</span><span class="pin-rv">主 ${Math.round(g.marketHomeProb*100)}% / 客 ${100-Math.round(g.marketHomeProb*100)}%</span></div>
-        <div class="pin-row"><span class="pin-rl">Sharp vs 市場差異</span><span class="pin-rv ${hasEdge?'a':''}">${edge>0?'+':''}${(edge*100).toFixed(1)}%${hasEdge?' → '+edgeTeam+' 被低估':' 無顯著差異'}</span></div>
+        <div class="pin-row"><span class="pin-rl">不讓分背離</span><span class="pin-rv ${g.mlHasEdge?'a':''}">${Math.abs(edge*100).toFixed(1)}%${g.mlHasEdge?` → ${edge>0?hZH.slice(-2):aZH.slice(-2)} 被低估 ⚡`:''}</span></div>
         ${g.spLine!=null?`
-        <div class="pin-row"><span class="pin-rl">讓分盤口</span><span class="pin-rv">${g.spLine} 分（主 ${g.spH?.toFixed(2)} / 客 ${g.spA?.toFixed(2)}）</span></div>
+        <div class="pin-row"><span class="pin-rl">讓分盤口</span><span class="pin-rv">${g.spLine} 分（主 ${g.spH?.toFixed(2)} / 客 ${g.spA?.toFixed(2)}）· ${g.spreadBookCount||1} 家</span></div>
+        ${g.sp_sharpEdge!=null?`<div class="pin-row"><span class="pin-rl">讓分背離</span><span class="pin-rv ${g.spHasEdge?'a':''}">${Math.abs(g.sp_sharpEdge*100).toFixed(1)}%${g.spHasEdge?' ⚡ 有 edge':''}</span></div>`:''}
         `:''}
-        <div class="pin-row"><span class="pin-rl">不讓分 EV</span><span class="pin-rv ${g.mlEV>=0?'g':'r'}">${g.mlEV>=0?'+':''}${g.mlEV.toFixed(1)}%</span></div>
-        <div class="pin-row"><span class="pin-rl">讓分 EV</span><span class="pin-rv ${g.spEV>-90?g.spEV>=0?'g':'r':''}">${g.spEV>-90?(g.spEV>=0?'+':'')+g.spEV.toFixed(1)+'%':'N/A'}</span></div>
+        <div class="pin-row"><span class="pin-rl">不讓分 EV</span><span class="pin-rv ${g.mlEV>=0?'g':'r'}">${g.mlEV>=0?'+':''}${g.mlEV.toFixed(1)}%${g.mlHasEdge?' ⚡':''}</span></div>
+        <div class="pin-row"><span class="pin-rl">讓分 EV</span><span class="pin-rv ${g.spEV==null?'':g.spEV>=0?'g':'r'}">${g.spEV==null?'N/A':(g.spEV>=0?'+':'')+g.spEV.toFixed(1)+'%'}${g.spHasEdge?' ⚡':''}</span></div>
       </div>
       ${hasEdge?`<div style="background:var(--green);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center">
-        <div><div style="font-size:10px;color:rgba(255,255,255,0.75)">Sharp 建議</div><div style="font-size:14px;font-weight:700;color:#fff">${zh(g.betTeamEn)} ${g.betType}</div></div>
+        <div><div style="font-size:10px;color:rgba(255,255,255,0.75)">Sharp 建議（有 edge）</div><div style="font-size:14px;font-weight:700;color:#fff">${zh(g.betTeamEn)} ${g.betType}</div></div>
         <div style="text-align:right"><div style="font-size:15px;font-weight:700;color:#fff;font-family:'JetBrains Mono',monospace">${g.betOdds?.toFixed(2)}</div><div style="font-size:12px;color:rgba(255,255,255,0.85)">EV ${g.bestEV>=0?'+':''}${g.bestEV.toFixed(1)}%</div></div>
       </div>`:`<div style="background:var(--bg3);border-radius:8px;padding:10px 14px;text-align:center;color:var(--text3);font-size:12px">Sharp 與市場一致，無明顯優勢</div>`}`;
     grid.appendChild(card);
