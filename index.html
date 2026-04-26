@@ -1283,6 +1283,42 @@ function renderGames(){
         ${g.spLine!=null?`<div class="data-row"><span class="dr-label">讓分盤口</span><span class="dr-val">${g.spLine<0?hZH.slice(-2)+' '+g.spLine:aZH.slice(-2)+' +'+Math.abs(g.spLine)} 分（${g.spreadBookCount||1} 家同 line）</span></div>`:''}
         ${g.sp_sharpEdge!=null&&Math.abs(g.sp_sharpEdge)>=0.02?`<div class="data-row"><span class="dr-label">讓分 Sharp vs 市場</span><span class="dr-val ${Math.abs(g.sp_sharpEdge)>=0.03?'a':''}">${g.sp_sharpEdge>0?'Sharp 更看好主場讓分':'Sharp 更看好客場讓分'} ${(Math.abs(g.sp_sharpEdge)*100).toFixed(1)}%</span></div>`:''}
       </div>
+      ${(() => {
+        // edge 強度條：用不讓分的 sharpEdge 為主
+        const edgeAbs = g.sharpEdge != null ? Math.abs(g.sharpEdge) * 100 : 0;
+        let edgeColor, edgeLabel, edgeIcon, edgeBg, edgeBarColor;
+        if (edgeAbs < 1) {
+          edgeColor = 'var(--text3)'; edgeLabel = '無 edge'; edgeIcon = '⚪';
+          edgeBg = 'var(--bg3)'; edgeBarColor = 'var(--text3)';
+        } else if (edgeAbs < 2) {
+          edgeColor = 'var(--amber)'; edgeLabel = '弱 edge'; edgeIcon = '🟡';
+          edgeBg = 'var(--amber2)'; edgeBarColor = 'var(--amber)';
+        } else if (edgeAbs < 3.5) {
+          edgeColor = 'var(--green)'; edgeLabel = '強 edge'; edgeIcon = '🟢';
+          edgeBg = 'var(--green2)'; edgeBarColor = 'var(--green)';
+        } else {
+          edgeColor = '#6c3fc5'; edgeLabel = '極強 edge'; edgeIcon = '⚡';
+          edgeBg = 'var(--purple2)'; edgeBarColor = '#6c3fc5';
+        }
+        const edgeWidth = Math.min(100, edgeAbs * 25); // 4% edge = 100% 滿格
+        const edgeDir = g.sharpEdge != null && g.sharpEdge !== 0
+          ? (g.sharpEdge > 0 ? `Sharp 更看好 ${hZH.slice(-2)}` : `Sharp 更看好 ${aZH.slice(-2)}`)
+          : 'Sharp 與市場一致';
+        return `
+        <div style="background:${edgeBg};border-radius:8px;padding:10px 12px;margin-bottom:10px;border:1px solid ${edgeBarColor}33">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <span style="font-size:11px;font-weight:600;color:${edgeColor}">${edgeIcon} ${edgeLabel}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:${edgeColor}">${edgeAbs.toFixed(1)}%</span>
+          </div>
+          <div style="height:5px;background:rgba(0,0,0,0.06);border-radius:3px;overflow:hidden;margin-bottom:5px">
+            <div style="height:100%;width:${edgeWidth}%;background:${edgeBarColor};border-radius:3px;transition:width 0.5s"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3)">
+            <span>${edgeDir}</span>
+            <span>${edgeAbs >= 2 ? '✅ 達下注門檻' : '⚠️ 不建議下注'}</span>
+          </div>
+        </div>`;
+      })()}
       <div class="ev-section">
         <div class="ev-title">📊 期望值（Sharp 隱含勝率 × 市場最佳賠率）</div>
         <div class="ev-options">
