@@ -225,6 +225,16 @@ main{max-width:1200px;margin:0 auto;padding:1.5rem 1.5rem 4rem}
       <div class="win-card"><div class="win-label">本月勝率</div><div class="win-val" id="winMonth">—</div><div class="win-sub" id="winMonthSub">載入中</div><div class="win-bar-wrap"><div class="win-bar" id="winMonthBar" style="width:0%"></div></div></div>
       <div class="win-card"><div class="win-label">高信心勝率</div><div class="win-val" id="winHighConf">—</div><div class="win-sub" id="winHighConfSub">信心度 &gt;70%</div><div class="win-bar-wrap"><div class="win-bar" id="winHighConfBar" style="width:0%"></div></div></div>
     </div>
+    <div id="steadySection" style="display:none;background:linear-gradient(135deg,#0a1f15,#0d3326);border-radius:14px;padding:20px;margin-bottom:1.25rem;border:1px solid rgba(10,158,110,0.3);position:relative;overflow:hidden">
+      <div style="position:absolute;top:-40px;right:-40px;width:160px;height:160px;background:radial-gradient(circle,rgba(10,158,110,0.3),transparent);border-radius:50%"></div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;position:relative;z-index:1">
+        <div style="background:#0a9e6e;color:#fff;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px">💰 穩健流</div>
+        <div style="font-size:15px;font-weight:700;color:#fff">今日穩健流推薦</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5)">賠率 1.40-1.65 · Sharp 勝率 65-72% · 有 edge</div>
+      </div>
+      <div id="steadyPicks" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;position:relative;z-index:1"></div>
+      <div id="steadyTotalRow" style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.15);display:flex;justify-content:space-between;font-size:12px;color:rgba(255,255,255,0.85);position:relative;z-index:1"></div>
+    </div>
     <div class="ai-section" id="aiSection" style="display:none">
       <div class="ai-header">
         <div class="ai-badge">🤖 AI 精選</div>
@@ -246,6 +256,7 @@ main{max-width:1200px;margin:0 auto;padding:1.5rem 1.5rem 4rem}
     <div class="filter-bar">
       <div class="filter-group">
         <button class="filter-btn active" onclick="setFilter('all',this)">全部</button>
+        <button class="filter-btn" onclick="setFilter('steady',this)" style="background:linear-gradient(135deg,#0a9e6e,#07c47f);color:#fff;border-color:#0a9e6e">💰 穩健流</button>
         <button class="filter-btn" onclick="setFilter('rec',this)">⭐ 高信心</button>
         <button class="filter-btn" onclick="setFilter('con',this)">🔶 可考慮</button>
         <button class="filter-btn" onclick="setFilter('agree',this)">✅ Sharp 同向</button>
@@ -841,6 +852,7 @@ function processOdds(oddsData){
   const maxEV=edgeGames.length?Math.max(...edgeGames.map(g=>g.bestEV)):0;
   document.getElementById('statMaxEV').textContent=maxEV>0?`+${maxEV.toFixed(1)}%`:'—';
   document.getElementById('statAgree').textContent=todayGames.filter(g=>g.sharpAgree).length;
+  renderSteadyPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));
   renderAIPicks(todayGames.filter(g=>!g.isFinal&&!g.isLive));
   buildDateTabs();
   renderGames();
@@ -962,6 +974,26 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
 
   const sharpAgree=sharpEdge!=null&&Math.abs(sharpEdge)<0.02;
 
+  // ============================================================
+  // 💰 穩健流判斷：賠率 1.40-1.65 + Sharp 不讓分勝率 65-72% + 有 edge
+  // 目標：低賠率高勝率，每次贏小錢但勝率高，長期 ROI 穩定
+  // ============================================================
+  // 找出 Sharp 看好那一隊的不讓分賠率
+  const favTeamOdds = mlFavHome ? (bestH2HOdds_home || h2hH) : (bestH2HOdds_away || h2hA);
+  const favTeamProb = mlSharpProb;  // Sharp 認為的勝率（看好那隊）
+
+  // 穩健流條件
+  const isSteady = favTeamOdds != null
+    && favTeamOdds >= 1.40 && favTeamOdds <= 1.65
+    && favTeamProb >= 0.65 && favTeamProb <= 0.72
+    && mlHasEdge  // 必須 Sharp 跟市場有顯著背離
+    && bookmakerCount >= 3;  // 至少 3 家報價
+
+  // 穩健流的 ROI 預期 = Sharp 真實勝率 × 賠率 - 1
+  const steadyROI = isSteady ? ((favTeamProb * favTeamOdds - 1) * 100) : null;
+  // 100 元下注的平均收益（每場）
+  const steadyAvgProfit = isSteady ? Math.round(favTeamProb * (favTeamOdds - 1) * 100 - (1 - favTeamProb) * 100) : null;
+
   // Polymarket：鎖定後也要凍結
   let pmInfo;
   if (usingSnapshot && snap.pmInfo !== undefined) {
@@ -1015,6 +1047,8 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
     mlMarketDivergence,spMarketDivergence,mlHasEdge,spHasEdge,
     spSharpProb,
     betTeamEn,betOdds,betType,betColor,recLevel,betReason,
+    isSteady,steadyROI,steadyAvgProfit,
+    favTeamOdds,favTeamProb,
     pmInfo,
     timeStr,startTime:st,twDate,
     isFinal,isLive,statusText,hScore,aScore,actualWinner,predCorrect,
@@ -1042,6 +1076,37 @@ function renderAIPicks(games){
   });
 }
 
+function renderSteadyPicks(games){
+  // 穩健流：賠率 1.40-1.65 + Sharp 勝率 65-72% + 有 edge
+  const picks=games.filter(g=>g.isSteady).sort((a,b)=>b.steadyROI-a.steadyROI);
+  const section=document.getElementById('steadySection');
+  const container=document.getElementById('steadyPicks');
+  const totalRow=document.getElementById('steadyTotalRow');
+  if(!picks.length){section.style.display='none';return}
+  section.style.display='block';
+  container.innerHTML='';
+  picks.forEach(g=>{
+    const teamZH=zh(g.hP>=50?g.hEn:g.aEn);
+    const card=document.createElement('div');
+    card.style.cssText='background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:12px 14px';
+    card.innerHTML=`
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-bottom:5px">${zh(g.aEn)} @ ${zh(g.hEn)}${g.isDoubleHeader?` · DH ${g.dhGameNum}`:''}</div>
+      <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:3px">${teamZH}</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.65);margin-bottom:8px">不讓分 · 賠率 ${g.favTeamOdds.toFixed(2)}</div>
+      <div style="height:5px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden;margin-bottom:4px"><div style="height:100%;width:${Math.round(g.favTeamProb*100)}%;background:linear-gradient(90deg,#0a9e6e,#07c47f)"></div></div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:rgba(255,255,255,0.45)"><span>Sharp 勝率</span><span>${Math.round(g.favTeamProb*100)}%</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700;color:#7ee8c8;margin-top:6px">+${g.steadyAvgProfit} 元</div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.5);margin-top:2px">每注 100 元 · ROI ${g.steadyROI>=0?'+':''}${g.steadyROI.toFixed(1)}%</div>`;
+    container.appendChild(card);
+  });
+  // 總計：今日穩健流場數 + 預期總獲利
+  const totalProfit=picks.reduce((s,g)=>s+g.steadyAvgProfit,0);
+  const avgROI=picks.reduce((s,g)=>s+g.steadyROI,0)/picks.length;
+  totalRow.innerHTML=`
+    <span>今日 <strong style="color:#fff">${picks.length}</strong> 場穩健流推薦 · 每場 100 元</span>
+    <span>今日預期淨賺 <strong style="color:#7ee8c8">${totalProfit>=0?'+':''}${totalProfit} 元</strong> · 平均 ROI <strong style="color:#7ee8c8">${avgROI>=0?'+':''}${avgROI.toFixed(1)}%</strong></span>`;
+}
+
 function renderGames(){
   let games=[...allGames];
   if(currentDateFilter!=='all'&&currentDateFilter!==null) games=games.filter(g=>g.twDate===currentDateFilter);
@@ -1049,6 +1114,7 @@ function renderGames(){
   else if(currentFilter==='con')games=games.filter(g=>g.recLevel==='con');
   else if(currentFilter==='agree')games=games.filter(g=>g.sharpAgree);
   else if(currentFilter==='finished')games=games.filter(g=>g.isFinal);
+  else if(currentFilter==='steady')games=games.filter(g=>g.isSteady);
 
   const livG=games.filter(g=>g.isLive);
   let preG=games.filter(g=>!g.isLive&&!g.isFinal);
@@ -1180,6 +1246,27 @@ function renderGames(){
           <div class="bet-ev" style="color:${g.betReason!=='no_edge'?'rgba(255,255,255,0.85)':'var(--text3)'}">EV ${g.bestEV>=0?'+':''}${g.bestEV.toFixed(1)}%</div>
         </div>
       </div>
+      ${g.isSteady ? `
+      <div style="background:linear-gradient(135deg,#0a9e6e,#07c47f);border-radius:10px;padding:12px 14px;margin-top:8px;color:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.5px">💰 穩健流推薦</div>
+          <div style="font-size:10px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:10px">低賠率高勝率</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-size:14px;font-weight:700">下 ${zh(g.hP>=50?g.hEn:g.aEn)} 不讓分</div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.85);margin-top:2px">Sharp 勝率 ${Math.round(g.favTeamProb*100)}% · 賠率 ${g.favTeamOdds.toFixed(2)}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:700">${g.steadyAvgProfit>=0?'+':''}${g.steadyAvgProfit} 元</div>
+            <div style="font-size:10px;color:rgba(255,255,255,0.85)">每注 100 元平均賺</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.2);font-size:10px;color:rgba(255,255,255,0.85);display:flex;justify-content:space-between">
+          <span>長期 ROI: <strong>${g.steadyROI>=0?'+':''}${g.steadyROI.toFixed(1)}%</strong></span>
+          <span>100 場後預期: <strong>${g.steadyAvgProfit>=0?'+':''}${(g.steadyAvgProfit*100).toLocaleString()} 元</strong></span>
+        </div>
+      </div>` : ''}
       ${countdownTip}`;
     grid.appendChild(card);
   }
