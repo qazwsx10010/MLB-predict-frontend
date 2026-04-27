@@ -359,7 +359,7 @@ function calcEV(p,o){return(p*o-1)*100}
 // ── 鎖定 + 快照系統
 const LOCK_MINUTES = 5;             // 開賽前 5 分鐘鎖定
 const SNAPSHOT_PREFIX = 'mlb_snap_';  // localStorage key 前綴
-const SNAPSHOT_TTL_HOURS = 48;        // 快照保留 48 小時後自動清除
+const SNAPSHOT_TTL_HOURS = 72;        // 快照保留 72 小時，可查前 3 天
 
 // 記憶體快照（同一 session 內優先使用，比 localStorage 快）
 const memSnapshots = {};
@@ -404,11 +404,11 @@ function cleanExpiredSnapshots() {
     if (!k || !k.startsWith(SNAPSHOT_PREFIX)) continue;
     try {
       const v = JSON.parse(localStorage.getItem(k) || '{}');
-      // 過期條件：保存超過 TTL，或比賽時間已過 6 小時（必定結束）
+      // 過期條件：保存超過 TTL（72小時），或比賽時間已過 72 小時（前 3 天可查）
       const parts = k.replace(SNAPSHOT_PREFIX, '').split('|');
       const gt = parseInt(parts[2] || 0);
       if ((v._savedAt && now - v._savedAt > cutoff) ||
-          (gt && now - gt > 6 * 3600 * 1000)) {
+          (gt && now - gt > 72 * 3600 * 1000)) {
         keysToRemove.push(k);
       }
     } catch (e) { keysToRemove.push(k); }
@@ -1061,8 +1061,25 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
     pmInfo = getPMProb(hEn);
   }
 
-  // 鎖定觸發點：剛進入 5 分鐘內 + 還沒快照 → 立即建立
-  if (isLocked && !snap && h2hH) {
+  // ============================================================
+  // 滾動快照策略：
+  // - 比賽未開始且距開賽 > 5 分鐘 → 每次有新賠率就「滾動更新」快照
+  // - 比賽未開始且距開賽 ≤ 5 分鐘（鎖定區）→ 不再更新，凍結最後一筆
+  // - 比賽進行中 / 已結束 → 不再更新，永遠用快照
+  // 這樣即使你沒在 5 分鐘前開系統，仍有最近一次賠率可用
+  // ============================================================
+  if (h2hH && !isLocked && !isStartedOrLater) {
+    // 滾動更新：未鎖定且未開賽 → 持續用最新賠率覆寫快照
+    const newSnap = {
+      h2hH, h2hA, spLine, spH, spA, ouLine,
+      bp_sharp, bp_market, sharpEdge, sharpBook,
+      sp_bp_sharp, sp_bp_market, sp_sharpEdge, spreadBookCount, bookmakerCount,
+      bestH2HOdds_home, bestH2HOdds_away, bestSpOdds_home, bestSpOdds_away,
+      pmInfo
+    };
+    saveSnapshot(hEn, aEn, gameTimeMs, newSnap);
+  } else if (isLocked && !snap && h2hH) {
+    // 鎖定觸發點：剛進入 5 分鐘內 + 還沒快照 → 立即建立最終鎖定快照
     const newSnap = {
       h2hH, h2hA, spLine, spH, spA, ouLine,
       bp_sharp, bp_market, sharpEdge, sharpBook,
@@ -1243,7 +1260,7 @@ function _renderGamesInner(){
 
   for(const g of games){
     try {
-      // 已結束但無賠率資料 → 顯示簡單終場卡片（不算入分析）
+      // 已結束但無賠率資料 → 顯示比分卡片（沒快照才會走這個路徑，現在很少見）
       if (g.noOddsData) {
         const hZH=zh(g.hEn),aZH=zh(g.aEn);
         const card=document.createElement('div');card.className='game-card';
@@ -1258,7 +1275,7 @@ function _renderGamesInner(){
           <div style="background:var(--bg3);border-radius:8px;padding:12px;margin-bottom:8px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
               <span style="font-weight:700;color:var(--text3)">⏹ 終場</span>
-              <span style="color:var(--text3);font-size:11px">無歷史賠率快照</span>
+              <span style="color:var(--text3);font-size:10px">這場開賽前未開啟過系統</span>
             </div>
             <div style="display:flex;align-items:center;justify-content:space-between">
               <div style="text-align:center;flex:1">
@@ -1271,8 +1288,7 @@ function _renderGamesInner(){
                 <div style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:700;color:${g.actualWinner===g.hEn?'var(--green)':'var(--text2)'}">${g.hScore}</div>
               </div>
             </div>
-          </div>
-          <div style="font-size:11px;color:var(--text3);text-align:center;padding:6px">這場比賽因為剛結束而沒有賠率資料，無法做事後分析</div>`;
+          </div>`;
         grid.appendChild(card);
         continue;
       }
