@@ -359,7 +359,7 @@ function calcEV(p,o){return(p*o-1)*100}
 // ── 鎖定 + 快照系統
 const LOCK_MINUTES = 5;             // 開賽前 5 分鐘鎖定
 const SNAPSHOT_PREFIX = 'mlb_snap_';  // localStorage key 前綴
-const SNAPSHOT_TTL_HOURS = 72;        // 快照保留 72 小時，可查前 3 天
+const SNAPSHOT_TTL_HOURS = 48;        // 快照保留 48 小時後自動清除
 
 // 記憶體快照（同一 session 內優先使用，比 localStorage 快）
 const memSnapshots = {};
@@ -404,11 +404,11 @@ function cleanExpiredSnapshots() {
     if (!k || !k.startsWith(SNAPSHOT_PREFIX)) continue;
     try {
       const v = JSON.parse(localStorage.getItem(k) || '{}');
-      // 過期條件：保存超過 TTL（72小時），或比賽時間已過 72 小時（前 3 天可查）
+      // 過期條件：保存超過 TTL，或比賽時間已過 6 小時（必定結束）
       const parts = k.replace(SNAPSHOT_PREFIX, '').split('|');
       const gt = parseInt(parts[2] || 0);
       if ((v._savedAt && now - v._savedAt > cutoff) ||
-          (gt && now - gt > 72 * 3600 * 1000)) {
+          (gt && now - gt > 6 * 3600 * 1000)) {
         keysToRemove.push(k);
       }
     } catch (e) { keysToRemove.push(k); }
@@ -888,9 +888,9 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
       sp_bp_sharp,sp_bp_market,sp_sharpEdge,spreadBookCount,bookmakerCount,
       bestH2HOdds_home,bestH2HOdds_away,bestSpOdds_home,bestSpOdds_away}=parsed;
 
-  // 鎖定期 / 比賽中 / 已結束 → 優先使用快照（如果存在且有效）
+  // 鎖定期 / 比賽中 / 已結束 → 優先使用快照（如果存在）
   let usingSnapshot = false;
-  if (snap && (isLocked || isStartedOrLater) && snap.h2hH) {
+  if (snap && (isLocked || isStartedOrLater)) {
     h2hH = snap.h2hH; h2hA = snap.h2hA;
     spLine = snap.spLine; spH = snap.spH; spA = snap.spA;
     ouLine = snap.ouLine; bp_sharp = snap.bp_sharp;
@@ -902,38 +902,6 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
     bestH2HOdds_home = snap.bestH2HOdds_home; bestH2HOdds_away = snap.bestH2HOdds_away;
     bestSpOdds_home = snap.bestSpOdds_home; bestSpOdds_away = snap.bestSpOdds_away;
     usingSnapshot = true;
-  }
-
-  // ============================================================
-  // 已結束 + 沒賠率資料 → 仍顯示「已結束卡片」（避免比賽剛打完就全白）
-  // ============================================================
-  if (!h2hH && isFinal) {
-    return {
-      hEn, aEn, hA: getAbbr(hEn), aA: getAbbr(aEn),
-      hP: 50, aP: 50, conf: 50,
-      h2hH: null, h2hA: null, spLine: null, spH: null, spA: null, ouLine: null,
-      sharpHomeProb: 0.5, marketHomeProb: 0.5,
-      sharpEdge: null, sharpBook: null, sharpAgree: false,
-      sp_bp_sharp: null, sp_bp_market: null, sp_sharpEdge: null,
-      spreadBookCount: 0, bookmakerCount: 0,
-      bestH2HOdds_home: null, bestH2HOdds_away: null,
-      bestSpOdds_home: null, bestSpOdds_away: null,
-      mlEV: 0, spEV: null, bestEV: 0,
-      mlMarketDivergence: 0, spMarketDivergence: null,
-      mlHasEdge: false, spHasEdge: false, spSharpProb: null,
-      betTeamEn: hEn, betOdds: null, betType: '已結束', betColor: 'skip', recLevel: 'obs',
-      betReason: 'no_data',
-      isSteady: false, steadyROI: null, steadyAvgProfit: null,
-      isHighProb: false, highProbROI: null, highProbAvgProfit: null, sharpFavOdds: null,
-      favTeamOdds: null, favTeamProb: 0.5,
-      pmInfo: null,
-      timeStr, startTime: st, twDate,
-      isFinal, isLive, statusText, hScore, aScore,
-      actualWinner: hScore > aScore ? hEn : aEn,
-      predCorrect: null,
-      isLocked: false, minsToStart, usingSnapshot: false, snapSource: null,
-      noOddsData: true,
-    };
   }
 
   if(!h2hH)return null;
@@ -1061,25 +1029,8 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
     pmInfo = getPMProb(hEn);
   }
 
-  // ============================================================
-  // 滾動快照策略：
-  // - 比賽未開始且距開賽 > 5 分鐘 → 每次有新賠率就「滾動更新」快照
-  // - 比賽未開始且距開賽 ≤ 5 分鐘（鎖定區）→ 不再更新，凍結最後一筆
-  // - 比賽進行中 / 已結束 → 不再更新，永遠用快照
-  // 這樣即使你沒在 5 分鐘前開系統，仍有最近一次賠率可用
-  // ============================================================
-  if (h2hH && !isLocked && !isStartedOrLater) {
-    // 滾動更新：未鎖定且未開賽 → 持續用最新賠率覆寫快照
-    const newSnap = {
-      h2hH, h2hA, spLine, spH, spA, ouLine,
-      bp_sharp, bp_market, sharpEdge, sharpBook,
-      sp_bp_sharp, sp_bp_market, sp_sharpEdge, spreadBookCount, bookmakerCount,
-      bestH2HOdds_home, bestH2HOdds_away, bestSpOdds_home, bestSpOdds_away,
-      pmInfo
-    };
-    saveSnapshot(hEn, aEn, gameTimeMs, newSnap);
-  } else if (isLocked && !snap && h2hH) {
-    // 鎖定觸發點：剛進入 5 分鐘內 + 還沒快照 → 立即建立最終鎖定快照
+  // 鎖定觸發點：剛進入 5 分鐘內 + 還沒快照 → 立即建立
+  if (isLocked && !snap && h2hH) {
     const newSnap = {
       h2hH, h2hA, spLine, spH, spA, ouLine,
       bp_sharp, bp_market, sharpEdge, sharpBook,
@@ -1103,15 +1054,10 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
 
   const actualWinner=isFinal?(hScore>aScore?hEn:aEn):null;
   let predCorrect=null;
-  if(isFinal&&betTeamEn&&actualWinner&&betReason!=='no_edge'){
-    if(betType.includes('讓分')&&spLine!=null){
-      const isHome=betTeamEn===hEn;
-      const diff=isHome?(hScore-aScore):(aScore-hScore);
-      const line=isHome?spLine:(-spLine);
-      predCorrect=diff>(-line);
-    }else{
-      predCorrect=actualWinner===betTeamEn;
-    }
+  // 永遠用 Sharp 看好的那隊做預測判斷（不管有沒有 edge）
+  const sharpPredTeam = mlFavHome ? hEn : aEn;
+  if(isFinal&&actualWinner){
+    predCorrect = actualWinner === sharpPredTeam;
   }
 
   return{hEn,aEn,hA:getAbbr(hEn),aA:getAbbr(aEn),hP,aP,conf,
@@ -1129,7 +1075,7 @@ function buildGameObj(hEn,aEn,parsed,st,timeStr,twDate,isFinal,isLive,statusText
     pmInfo,
     timeStr,startTime:st,twDate,
     isFinal,isLive,statusText,hScore,aScore,actualWinner,predCorrect,
-    isLocked,minsToStart,usingSnapshot,snapSource};
+    sharpPredTeam,isLocked,minsToStart,usingSnapshot,snapSource};
 }
 
 function renderAIPicks(games){
@@ -1218,20 +1164,6 @@ function renderHighProbPicks(games){
 }
 
 function renderGames(){
-  try {
-    _renderGamesInner();
-  } catch (err) {
-    console.error('renderGames 全域錯誤：', err);
-    document.getElementById('gamesContainer').innerHTML = `
-      <div class="error-state">
-        頁面渲染發生錯誤<br>
-        <span style="font-size:11px;color:var(--text3);font-weight:normal">${err.message}</span><br>
-        <button onclick="location.reload()" style="margin-top:10px;background:var(--green);color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 重新載入頁面</button>
-      </div>`;
-  }
-}
-
-function _renderGamesInner(){
   let games=[...allGames];
   if(currentDateFilter!=='all'&&currentDateFilter!==null) games=games.filter(g=>g.twDate===currentDateFilter);
   if(currentFilter==='rec')games=games.filter(g=>g.recLevel==='rec');
@@ -1259,58 +1191,37 @@ function _renderGamesInner(){
   const grid=document.createElement('div');grid.className='games-grid';
 
   for(const g of games){
-    try {
-      // 已結束但無賠率資料 → 顯示比分卡片（沒快照才會走這個路徑，現在很少見）
-      if (g.noOddsData) {
-        const hZH=zh(g.hEn),aZH=zh(g.aEn);
-        const card=document.createElement('div');card.className='game-card';
-        const dhBadge = g.isDoubleHeader
-          ? `<span style="font-size:10px;background:rgba(26,111,212,0.12);color:#1a6fd4;padding:2px 8px;border-radius:10px;border:1px solid rgba(26,111,212,0.3);font-weight:700;margin-left:6px">⚾ DH 第 ${g.dhGameNum} 場</span>`
-          : '';
-        card.innerHTML = `
-          <div class="card-header">
-            <div class="card-time">${g.timeStr}${dhBadge}</div>
-            <div class="rec-badge obs">— 終場</div>
-          </div>
-          <div style="background:var(--bg3);border-radius:8px;padding:12px;margin-bottom:8px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-              <span style="font-weight:700;color:var(--text3)">⏹ 終場</span>
-              <span style="color:var(--text3);font-size:10px">這場開賽前未開啟過系統</span>
-            </div>
-            <div style="display:flex;align-items:center;justify-content:space-between">
-              <div style="text-align:center;flex:1">
-                <div style="font-size:11px;color:var(--text3);margin-bottom:3px">${aZH}</div>
-                <div style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:700;color:${g.actualWinner===g.aEn?'var(--green)':'var(--text2)'}">${g.aScore}</div>
-              </div>
-              <div style="font-size:14px;color:var(--text3)">:</div>
-              <div style="text-align:center;flex:1">
-                <div style="font-size:11px;color:var(--text3);margin-bottom:3px">${hZH}</div>
-                <div style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:700;color:${g.actualWinner===g.hEn?'var(--green)':'var(--text2)'}">${g.hScore}</div>
-              </div>
-            </div>
-          </div>`;
-        grid.appendChild(card);
-        continue;
-      }
+    const hZH=zh(g.hEn),aZH=zh(g.aEn),betZH=zh(g.betTeamEn);
+    const bkH=g.hP;
+    const injHStr=injDisplay(g.hEn),injAStr=injDisplay(g.aEn);
+    const pmH=g.pmInfo;
+    const pmHPct=pmH?pmH.probPct:null;
+    const pmReliable=pmH?pmH.reliable:false;
+    const recLabel=g.recLevel==='rec'?'⭐ 推薦':g.recLevel==='con'?'🔶 可考慮':'— 觀望';
 
-      const hZH=zh(g.hEn),aZH=zh(g.aEn),betZH=zh(g.betTeamEn);
-      const bkH=g.hP;
-      const injHStr=injDisplay(g.hEn),injAStr=injDisplay(g.aEn);
-      const pmH=g.pmInfo;
-      const pmHPct=pmH?pmH.probPct:null;
-      const pmReliable=pmH?pmH.reliable:false;
-      const recLabel=g.recLevel==='rec'?'⭐ 推薦':g.recLevel==='con'?'🔶 可考慮':'— 觀望';
-
-    // 終場結果
-    const resultBanner=g.isFinal?`
-      <div style="background:${g.predCorrect?'var(--green2)':'var(--red2)'};border-radius:8px;padding:8px 12px;margin-bottom:10px;border:1px solid ${g.predCorrect?'rgba(10,158,110,0.2)':'rgba(212,48,80,0.2)'}">
-        <div style="display:flex;justify-content:space-between"><span style="font-weight:700;color:${g.predCorrect===null?'var(--text3)':g.predCorrect?'var(--green)':'var(--red)'}">${g.predCorrect===null?'⏳':g.predCorrect?'✓ 正確':'✗ 失敗'}</span><span style="color:var(--text2);font-size:11px">終場</span></div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
-          <div style="text-align:center;flex:1"><div style="font-size:10px;color:var(--text3)">${aZH.slice(-2)}（客）</div><div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:${g.actualWinner===g.aEn?'var(--green)':'var(--text2)'}">${g.aScore}</div></div>
-          <div style="font-size:13px;color:var(--text3)">:</div>
-          <div style="text-align:center;flex:1"><div style="font-size:10px;color:var(--text3)">${hZH.slice(-2)}（主）</div><div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:700;color:${g.actualWinner===g.hEn?'var(--green)':'var(--text2)'}">${g.hScore}</div></div>
+    // 終場預測結果徽章（綠色正確/紅色失敗）
+    const predBadge = g.isFinal && g.predCorrect !== null ? `
+      <div style="background:${g.predCorrect?'linear-gradient(135deg,#0a9e6e,#07c47f)':'linear-gradient(135deg,#d43050,#e8505b)'};border-radius:10px;padding:12px 14px;margin-bottom:10px;color:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:15px;font-weight:700">${g.predCorrect?'✓ 預測正確':'✗ 預測失敗'}</span>
+          <span style="font-size:11px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:10px">終場</span>
         </div>
-      </div>`:g.isLive?`
+        <div style="font-size:12px;color:rgba(255,255,255,0.9);margin-bottom:8px">預測依據：${zh(g.sharpPredTeam)} 勝（Sharp 信心 ${g.conf}%）</div>
+        <div style="display:flex;align-items:center;justify-content:space-around">
+          <div style="text-align:center;flex:1">
+            <div style="font-size:10px;color:rgba(255,255,255,0.75)">${aZH}（客）</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:${g.actualWinner===g.aEn?'#fff':'rgba(255,255,255,0.5)'}">${g.aScore}</div>
+          </div>
+          <div style="font-size:14px;color:rgba(255,255,255,0.6)">:</div>
+          <div style="text-align:center;flex:1">
+            <div style="font-size:10px;color:rgba(255,255,255,0.75)">${hZH}（主）</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:${g.actualWinner===g.hEn?'#fff':'rgba(255,255,255,0.5)'}">${g.hScore}</div>
+          </div>
+        </div>
+      </div>` : '';
+
+    // 進行中比分
+    const resultBanner=g.isLive?`
       <div style="background:rgba(224,48,48,0.1);border-radius:8px;padding:8px 12px;margin-bottom:10px;border:1px solid rgba(224,48,48,0.2)">
         <div style="display:flex;justify-content:space-between"><span style="font-weight:700;color:#e03030;animation:pulse 1s infinite">🔴 進行中</span><span style="color:var(--text2);font-size:11px">${g.statusText}</span></div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
@@ -1360,7 +1271,7 @@ function _renderGamesInner(){
 
     card.innerHTML=`
       <div class="card-header"><div class="card-time">${g.timeStr}${dhBadge}${lockBadge}</div><div class="rec-badge ${g.recLevel}">${recLabel}</div></div>
-      ${resultBanner}
+      ${g.isFinal ? predBadge : resultBanner}
       <div class="matchup-prob">
         <div class="mp-team ${g.aP>g.hP?'fav':'dog'}" style="flex:${Math.max(g.aP,20)}">
           <div class="mp-label">客場</div><div class="mp-name">${aZH}</div><div class="mp-pct">${g.aP}%</div>
@@ -1483,26 +1394,12 @@ function _renderGamesInner(){
         </div>
       </div>` : ''}
       ${countdownTip}`;
-      grid.appendChild(card);
-    } catch (err) {
-      console.error('卡片渲染失敗：', g.aEn, '@', g.hEn, err);
-      // 渲染失敗也不要中斷整個畫面，給一個簡單的錯誤卡
-      const fallbackCard = document.createElement('div');
-      fallbackCard.className = 'game-card';
-      fallbackCard.innerHTML = `
-        <div class="card-header">
-          <div class="card-time">${g.timeStr || '時間未知'}</div>
-          <div class="rec-badge obs">— 資料異常</div>
-        </div>
-        <div style="padding:20px;text-align:center;color:var(--text3);font-size:12px">
-          ${zh(g.aEn || '')} @ ${zh(g.hEn || '')}<br>
-          <span style="font-size:11px;color:var(--red)">這場資料載入異常，請按 🔄 更新重試</span>
-        </div>`;
-      grid.appendChild(fallbackCard);
-    }
+    grid.appendChild(card);
   }
   container.appendChild(grid);
 }
+
+// ── Pinnacle 分析頁面
 function renderPinnacle(){
   const container=document.getElementById('pinnacleContainer');
   if(!allGames.length){container.innerHTML='<div class="loading-state">請先在比賽預測頁面載入 Odds API 數據</div>';return}
